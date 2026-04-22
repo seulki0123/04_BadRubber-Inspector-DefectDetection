@@ -30,3 +30,14 @@ class HeatmapColorRanges:
             np.array([25, 70, 70], dtype=np.uint8),
             np.array([50, 255, 255], dtype=np.uint8),
         )
+
+    def blue(self) -> np.ndarray:
+        # JET 컬러맵에서 "차가운" 영역 (cyan ~ dark blue)
+        return cv2.inRange(
+            self.heatmap_hsv,
+            np.array([85, 70, 70], dtype=np.uint8),
+            np.array([135, 255, 255], dtype=np.uint8),
+        )
+
+    def non_blue(self) -> np.ndarray:
+        return cv2.bitwise_not(self.blue())

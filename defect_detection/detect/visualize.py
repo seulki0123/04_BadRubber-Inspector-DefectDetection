@@ -69,7 +69,10 @@ def visualize(
         vis_img = draw_bboxes_xyxyn(
             image=vis_img,
             bboxes_xyxyn=[region.bboxes_xyxy_n for region in anomaly.regions],
-            labels=[f"{region.class_name} {region.confidence:.2f}" for region in anomaly_cls.regions],
+            labels=[
+                f"{cls.class_name} {cls.confidence:.2f} a={reg.area:.0f}"
+                for reg, cls in zip(anomaly.regions, anomaly_cls.regions)
+            ],
             colors=[region.color for region in anomaly_cls.regions],
             is_draw=[not region.is_pass for region in anomaly_cls.regions] if not show_pass_classes else None,
             thickness=5,
@@ -97,7 +100,10 @@ def visualize(
         vis_img = draw_bboxes_xyxyn(
             image=vis_img,
             bboxes_xyxyn=[seg.bboxes_xyxy_n for seg in seg_regions],
-            labels=[f"{seg.class_name} {seg.confidence:.2f}" for seg in seg_regions],
+            labels=[
+                f"{seg.class_name} {seg.confidence:.2f} a={seg.area:.0f}"
+                for seg in seg_regions
+            ],
             colors=[seg.color for seg in seg_regions],
             thickness=5,
             font_scale=2,

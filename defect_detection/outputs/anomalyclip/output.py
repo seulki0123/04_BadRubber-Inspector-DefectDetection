@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from dataclasses import dataclass, field
 import cv2
 import numpy as np
@@ -37,11 +37,13 @@ class AnomalyCLIPBatchItem:
     __slots__ = (
         "map",
         "regions",
+        "super_regions",
         "global_score",
         "source",
     )
     map: np.ndarray
     regions: List[AnomalyRegion]
+    super_regions: List[AnomalyRegion]
     global_score: float
     source: str
 
@@ -51,7 +53,9 @@ class AnomalyCLIPOutput:
         "maps",
         "score_threshold",
         "area_threshold",
+        "super_area_threshold",
         "batch_regions",
+        "super_batch_regions",
         "global_scores",
         "source",
     )
@@ -60,15 +64,21 @@ class AnomalyCLIPOutput:
     maps: np.ndarray                 # (B, H, W)
     score_threshold: float
     area_threshold: float
+    # super defect(= red) region 으로 인정할 최소 픽셀 크기.
+    # None 이면 area_threshold 와 동일하게 동작.
+    # NOTE: __slots__ 와 dataclass default 충돌 때문에 기본값을 두지 않는다.
+    # 호출부에서 명시적으로 None 을 전달해야 한다.
+    super_area_threshold: Optional[float]
     source: str
 
     def __post_init__(self):
         self._validate_inputs()
 
-        batch_regions, global_scores = self._extract_regions_batch()
+        batch_regions, super_batch_regions, global_scores = self._extract_regions_batch()
 
         # create slots-only attributes here
         object.__setattr__(self, "batch_regions", batch_regions)
+        object.__setattr__(self, "super_batch_regions", super_batch_regions)
         object.__setattr__(self, "global_scores", global_scores)
 
     def _validate_inputs(self):
@@ -85,38 +95,104 @@ class AnomalyCLIPOutput:
         if not isinstance(self.area_threshold, (float, int)):
             raise TypeError("area_threshold must be float")
 
+        if self.super_area_threshold is not None and not isinstance(
+            self.super_area_threshold, (float, int)
+        ):
+            raise TypeError("super_area_threshold must be float or None")
+
     def _extract_regions_batch(
         self,
-    ) -> Tuple[List[List[AnomalyRegion]], List[float]]:
+    ) -> Tuple[List[List[AnomalyRegion]], List[List[AnomalyRegion]], List[float]]:
 
         regions_batch = []
+        super_regions_batch = []
         global_scores_batch = []
 
         for amap in self.maps:
-            regions = self._extract_regions_single(amap)
-            # global_score = self._compute_global_score(amap)
-            global_score = 0.0
+            regions, super_regions = self._extract_regions_single(amap)
+            global_score = self._compute_global_score(amap)
+            print(global_score)
+            # global_score = 0.0
 
             regions_batch.append(regions)
+            super_regions_batch.append(super_regions)
             global_scores_batch.append(global_score)
 
-        return regions_batch, global_scores_batch
+        return regions_batch, super_regions_batch, global_scores_batch
 
     def _extract_regions_single(
         self,
         amap: np.ndarray,
-    ) -> List[AnomalyRegion]:
+    ) -> Tuple[List[AnomalyRegion], List[AnomalyRegion]]:
 
         H, W = amap.shape
-        amap = np.clip(amap.astype(np.float32), 0.0, 1.0)
+        raw = np.asarray(amap, dtype=np.float32)
+        raw = np.nan_to_num(raw, nan=0.0, posinf=0.0, neginf=0.0)
+        raw = np.clip(raw, 0.0, None)
 
-        # "시각화에서 빨간색으로 보이는 영역" 기준으로 마스크 생성.
-        color_ranges = HeatmapColorRanges(amap)
-        binary = cv2.bitwise_or(color_ranges.red(), color_ranges.yellow())
+        # Normalize to [0, 1] for colormap-based region extraction.
+        # The raw anomaly map can have arbitrary small values (e.g. max ~0.2)
+        # that would map entirely to "blue" in JET without normalization,
+        # producing zero detected regions.
+        positive = raw[raw > 0]
+        if positive.size == 0:
+            return [], []
 
-        # score_threshold를 추가 하한으로 적용(원하면 0.0으로 두고 빨간색 기준만 사용 가능)
-        score_mask = (amap >= float(max(self.score_threshold, 0.0))).astype(np.uint8) * 255
+        lo = float(np.percentile(positive, 5.0))
+        hi = float(np.percentile(positive, 99.5))
+        if hi <= lo:
+            lo = float(positive.min())
+            hi = float(positive.max())
+
+        if hi <= lo:
+            return [], []
+
+        amap_norm = np.clip((raw - lo) / (hi - lo), 0.0, 1.0).astype(np.float32)
+        amap_norm[raw <= 0] = 0.0
+
+        # Build raw-value score mask using score_threshold mapped back
+        # through the same normalization (so threshold 0.25 means ~top 25%
+        # of the positive value range, not absolute raw value).
+        norm_threshold = float(max(self.score_threshold, 0.0))
+        score_mask = (amap_norm >= norm_threshold).astype(np.uint8) * 255
+
+        color_ranges = HeatmapColorRanges(amap_norm)
+
+        # 시각화에서 파란색(차가운 영역)을 제외한 모든 영역을 일반 region 으로 추출.
+        binary = color_ranges.non_blue()
         binary = cv2.bitwise_and(binary, score_mask)
+        regions = self._regions_from_binary(
+            binary, amap_norm, H, W, area_threshold=self.area_threshold,
+        )
+
+        # "가장 뜨거운" red 영역을 super defect 로 별도 추출.
+        # super defect 는 일정 크기(= super_area_threshold) 이상부터만 인정.
+        super_area_threshold = (
+            self.super_area_threshold
+            if self.super_area_threshold is not None
+            else self.area_threshold
+        )
+        super_binary = cv2.bitwise_and(color_ranges.red(), score_mask)
+        super_regions = self._regions_from_binary(
+            super_binary, amap_norm, H, W, area_threshold=super_area_threshold,
+        )
+
+        return regions, super_regions
+
+    def _regions_from_binary(
+        self,
+        binary: np.ndarray,
+        amap_norm: np.ndarray,
+        H: int,
+        W: int,
+        area_threshold: Optional[float] = None,
+    ) -> List[AnomalyRegion]:
+
+        if binary is None or not np.any(binary):
+            return []
+
+        if area_threshold is None:
+            area_threshold = self.area_threshold
 
         # 작은 끊김/구멍을 줄여 bbox 누락 완화
         kernel_close = np.ones((5, 5), dtype=np.uint8)
@@ -134,7 +210,7 @@ class AnomalyCLIPOutput:
 
         for cnt in contours:
             area = float(cv2.contourArea(cnt))
-            if area < self.area_threshold:
+            if area < area_threshold:
                 continue
             area_n = area / float(H * W)
 
@@ -154,7 +230,7 @@ class AnomalyCLIPOutput:
                 max(0.0, min(1.0, (y + h) / H)),
             )
 
-            score = self._compute_polygon_score(amap, polygon)
+            score = self._compute_polygon_score(amap_norm, polygon)
 
             regions.append(
                 AnomalyRegion(
@@ -224,6 +300,7 @@ class AnomalyCLIPOutput:
             yield AnomalyCLIPBatchItem(
                 map=self.maps[i],
                 regions=self.batch_regions[i],
+                super_regions=self.super_batch_regions[i],
                 global_score=self.global_scores[i],
                 source=self.source,
             )
@@ -232,6 +309,7 @@ class AnomalyCLIPOutput:
         return AnomalyCLIPBatchItem(
             map=self.maps[idx],
             regions=self.batch_regions[idx],
+            super_regions=self.super_batch_regions[idx],
             global_score=self.global_scores[idx],
             source=self.source,
         )
@@ -247,19 +325,26 @@ def merge_anomlay_outputs(outputs: List[AnomalyCLIPOutput]) -> AnomalyCLIPOutput
         maps=dummy_maps,
         score_threshold=0.0,
         area_threshold=0.0,
+        super_area_threshold=None,
         source="merged",
     )
 
     # 안전하게 override
     new_regions = [[] for _ in range(batch_size)]
+    new_super_regions = [[] for _ in range(batch_size)]
 
     for out in outputs:
         if out is None:
             continue
         for i in range(batch_size):
             new_regions[i].extend(out.batch_regions[i])
+            # super_batch_regions 는 AnomalyCLIP 계열에만 존재하므로 안전하게 접근
+            super_regions = getattr(out, "super_batch_regions", None)
+            if super_regions is not None:
+                new_super_regions[i].extend(super_regions[i])
 
     object.__setattr__(merged, "batch_regions", new_regions)
+    object.__setattr__(merged, "super_batch_regions", new_super_regions)
 
     return merged
 

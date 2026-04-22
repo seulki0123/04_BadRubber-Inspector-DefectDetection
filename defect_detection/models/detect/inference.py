@@ -38,6 +38,7 @@ class ObjectDetector:
             maps=maps,
             score_threshold=self.threshold,
             area_threshold=0,  # bbox는 작을 수 있으니 낮게
+            super_area_threshold=None,
             source=self.name,
         )
 

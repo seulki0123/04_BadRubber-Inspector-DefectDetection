@@ -37,12 +37,14 @@ class AnomalyCLIPInference:
         DPAM_layer: int = 20,
         score_threshold: float = 0.25,
         area_threshold: int = 300,
+        super_area_threshold: Optional[int] = None,
         name: str = "anomalyclip",
     ) -> None:
         setup_seed(10)
 
         self.checkpoint_path = checkpoint_path
-        self.features_list = features_list if features_list is not None else [24]
+        # self.features_list = features_list if features_list is not None else [24]
+        self.features_list = features_list if features_list is not None else [6, 12, 18, 24]
         self.imgsz = imgsz
         self.depth = depth
         self.n_ctx = n_ctx
@@ -52,6 +54,7 @@ class AnomalyCLIPInference:
         self.DPAM_layer = DPAM_layer
         self.score_threshold = score_threshold
         self.area_threshold = area_threshold
+        self.super_area_threshold = super_area_threshold
         self.name = name
 
         self.device: str = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -267,6 +270,7 @@ class AnomalyCLIPInference:
             maps=maps_np,
             score_threshold=self.score_threshold,
             area_threshold=self.area_threshold,
+            super_area_threshold=self.super_area_threshold,
             source=self.name,
         )
         probs_list = [float(x) for x in image_abnormal_probs.cpu().numpy().reshape(-1)]
