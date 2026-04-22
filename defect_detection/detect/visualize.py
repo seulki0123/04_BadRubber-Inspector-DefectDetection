@@ -104,6 +104,26 @@ def visualize(
             font_thickness=2,
         )
 
+        # Dot detections live in anomaly outputs. When anomaly bbox drawing is off,
+        # keep them visible in segmentation mode by drawing dot bboxes here.
+        if not show_anomaly_regions_bbox:
+            dot_pairs = [
+                (region, cls)
+                for region, cls in zip(anomaly.regions, anomaly_cls.regions)
+                if str(getattr(region, "source", "")).startswith("dot_detector")
+                and (show_pass_classes or not cls.is_pass)
+            ]
+            if dot_pairs:
+                vis_img = draw_bboxes_xyxyn(
+                    image=vis_img,
+                    bboxes_xyxyn=[region.bboxes_xyxy_n for region, _ in dot_pairs],
+                    labels=[f"{cls.class_name} {cls.confidence:.2f}" for _, cls in dot_pairs],
+                    colors=[cls.color for _, cls in dot_pairs],
+                    thickness=5,
+                    font_scale=2,
+                    font_thickness=2,
+                )
+
     return vis_img
 
 def draw_normalized_polygons(
