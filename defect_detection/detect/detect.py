@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 
 from defect_detection.models import AnomalyCLIPInference, BackgroundRemover, Classifier, RegionClassifierAdapter, Segmenter, RegionSegmenterAdapter, ObjectDetector, Cluster
-from defect_detection.outputs import RegionClassificationOutput, ClassificationBatchItem, merge_anomlay_outputs, filter_by_cluster, merge_cls_outputs
+from defect_detection.outputs import RegionClassificationOutput, ClassificationBatchItem, Classification, merge_anomlay_outputs, filter_by_cluster, merge_cls_outputs
 from defect_detection.utils import load_config, random_color
 from .result import DetectorOutput
 from .visualize import draw_normalized_polygons
@@ -136,7 +136,7 @@ class Detector:
         merged_dot = merge_anomlay_outputs([dot1, dot2]) if dot1 is not None else None
         t8 = time.time()
 
-        dot_clusters = self.region_dot_cluster.infer(images, merged_dot) if self.region_dot_cluster is not None else None
+        dot_clusters = self.region_dot_cluster.infer(images, merged_dot) if self.region_dot_cluster is not None else (RegionClassificationOutput([[Classification(class_id=-1, class_name=r.source, confidence=float(r.confidence), is_pass=False, color=(0, 0, 255)) for r in regions] for regions in merged_dot.batch_regions]) if merged_dot is not None else None)
         merged_dot = filter_by_cluster(merged_dot, dot_clusters) if dot_clusters is not None else merged_dot
         t9 = time.time()
         
