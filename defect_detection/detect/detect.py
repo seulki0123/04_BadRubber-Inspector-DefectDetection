@@ -1,5 +1,5 @@
 import time
-from typing import List, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -99,8 +99,16 @@ class Detector:
     # Main API
     # ---------------------------------
 
-    def detect(self, images: List[np.ndarray]) -> DetectorOutput:
+    def detect(
+        self,
+        images: List[np.ndarray],
+        dot_confs: Optional[Sequence[Optional[float]]] = None,
+    ) -> DetectorOutput:
         t0 = time.time()
+        if dot_confs is not None and len(images) != len(dot_confs):
+            raise ValueError(
+                f"len(images) ({len(images)}) must equal len(dot_confs) ({len(dot_confs)})"
+            )
 
         # read images
         # images = [cv2.imread(p) for p in imgs_path]
@@ -131,8 +139,8 @@ class Detector:
         t7 = time.time()
 
         # (Optional, Independent from Anomaly) dot detection
-        dot1 = self.dot_detector1.infer(foreground.images) if self.dot_detector1 is not None else None
-        dot2 = self.dot_detector2.infer(foreground.images) if self.dot_detector2 is not None else None
+        dot1 = self.dot_detector1.infer(foreground.images, conf_thresholds=dot_confs) if self.dot_detector1 is not None else None
+        dot2 = self.dot_detector2.infer(foreground.images, conf_thresholds=dot_confs) if self.dot_detector2 is not None else None
         merged_dot = merge_anomlay_outputs([dot1, dot2]) if dot1 is not None else None
         t8 = time.time()
 
