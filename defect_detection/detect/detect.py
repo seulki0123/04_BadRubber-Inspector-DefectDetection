@@ -71,6 +71,18 @@ class Detector:
         else:
             self.region_dot_cluster = None
 
+        if config.get('dot_classifier') is not None:
+            self.region_dot_classifier = RegionClassifierAdapter(
+                Classifier(
+                checkpoint_path=config["dot_classifier"]["checkpoint"],
+                imgsz=config["dot_classifier"]["imgsz"],
+                conf_threshold=config["dot_classifier"]["threshold"],
+                classes=config["dot_classifier"]["classes"],
+                )
+            )
+        else:
+            self.region_dot_classifier = None
+
         if config['classifier'] is not None:
             self.region_classifier = RegionClassifierAdapter(
                 Classifier(
@@ -147,11 +159,14 @@ class Detector:
         dot_clusters = self.region_dot_cluster.infer(images, merged_dot) if self.region_dot_cluster is not None else (RegionClassificationOutput([[Classification(class_id=-1, class_name="foreign", confidence=float(r.confidence), is_pass=False, color=(0, 0, 255)) for r in regions] for regions in merged_dot.batch_regions]) if merged_dot is not None else None)
         merged_dot = filter_by_cluster(merged_dot, dot_clusters) if dot_clusters is not None else merged_dot
         t9 = time.time()
+
+        dot_cls = self.region_dot_classifier.infer(images, merged_dot) if self.region_dot_classifier is not None else dot_clusters
+        t10 = time.time()
         
         # Merge Anomaly's and Dot Detection's Classifications
         merged_anomaly = merge_anomlay_outputs([anomaly, merged_dot])
-        merged_cls = merge_cls_outputs([anomaly_cls, dot_clusters])
-        t10 = time.time()
+        merged_cls = merge_cls_outputs([anomaly_cls, dot_cls])
+        t11 = time.time()
 
         # TODO:
         # Merge Segmentation and Dot Detection
@@ -167,8 +182,9 @@ class Detector:
         print(f"dot1: {(t8-t7)*1000}ms")
         print(f"dot2: {(t9-t8)*1000}ms")
         print(f"dot_cluster: {(t10-t9)*1000}ms")
+        print(f"dot_classification: {(t11-t10)*1000}ms")
         print(f"image count: {len(images)}")
-        print(f"total: {(t10-t0)*1000}ms")
+        print(f"total: {(t11-t0)*1000}ms")
 
         return DetectorOutput(
             images=images,
