@@ -136,7 +136,7 @@ class Detector:
         merged_dot = merge_anomlay_outputs([dot1, dot2]) if dot1 is not None else None
         t8 = time.time()
 
-        dot_clusters = self.region_dot_cluster.infer(images, merged_dot) if self.region_dot_cluster is not None else (RegionClassificationOutput([[Classification(class_id=-1, class_name=r.source, confidence=float(r.confidence), is_pass=False, color=(0, 0, 255)) for r in regions] for regions in merged_dot.batch_regions]) if merged_dot is not None else None)
+        dot_clusters = self.region_dot_cluster.infer(images, merged_dot) if self.region_dot_cluster is not None else (RegionClassificationOutput([[Classification(class_id=-1, class_name="foreign", confidence=float(r.confidence), is_pass=False, color=(0, 0, 255)) for r in regions] for regions in merged_dot.batch_regions]) if merged_dot is not None else None)
         merged_dot = filter_by_cluster(merged_dot, dot_clusters) if dot_clusters is not None else merged_dot
         t9 = time.time()
         
