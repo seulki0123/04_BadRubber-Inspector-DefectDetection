@@ -102,7 +102,7 @@ class Cluster:
             class_id = class_information["class_id"]
             class_name = class_information["name"]
             color = class_information["color"]
-            is_pass = (w*h < 1000000) and (class_information["pass"] or pred_score < self.threshold)
+            is_pass = class_information["pass"] or pred_score < self.threshold
             
             outputs.append({
                 "class_id": class_id,
