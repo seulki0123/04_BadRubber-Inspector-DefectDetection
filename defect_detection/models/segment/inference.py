@@ -9,23 +9,64 @@ from defect_detection.outputs import Segmentation
 
 
 class Segmenter:
-    def __init__(
-        self,
-        checkpoint_path: str,
-        classes: Dict[int, Dict[str, Any]],
-        imgsz: int = 32,
-        conf_threshold: float = 0.5,
-    ) -> None:
-        self.model = YOLO(checkpoint_path)
-        self.imgsz = imgsz
-        self.conf_threshold = conf_threshold
-        self.classes = classes
+    """Multi-checkpoint YOLO segmenter.
+
+    Each entry in `models` is a dict describing one checkpoint:
+        {
+            "checkpoint": str,                # weights path
+            "imgsz": int,                     # inference image size
+            "threshold": float,               # conf threshold (alias: conf_threshold)
+            "classes": {                      # this model's class table
+                <yolo_cls_id>: {
+                    "name": str,
+                    "color": tuple | None,
+                    "pass": bool,             # True -> skip this class for this model
+                    "description": str,       # (optional)
+                },
+                ...
+            },
+        }
+
+    Per-model `classes`:
+        - Classes omitted from the dict are treated as `pass=True` (skipped).
+        - Same `name` across models is unified in the final output -- their
+          polygons are merged together via mask union.
+    """
+
+    def __init__(self, models: List[Dict[str, Any]]) -> None:
+        if not models:
+            raise ValueError("Segmenter requires at least one model config.")
+
+        self.models: List[Dict[str, Any]] = []
+        for cfg in models:
+            if "checkpoint" not in cfg:
+                raise ValueError(
+                    f"Segmenter model config missing 'checkpoint': {cfg!r}"
+                )
+            self.models.append(
+                {
+                    "model": YOLO(cfg["checkpoint"]),
+                    "imgsz": int(cfg.get("imgsz", 640)),
+                    "conf_threshold": float(
+                        cfg.get(
+                            "threshold",
+                            cfg.get("conf_threshold", 0.5),
+                        )
+                    ),
+                    "classes": cfg.get("classes") or {},
+                }
+            )
+
         self._warmup()
 
     def _warmup(self, batch_size: int = 1) -> None:
-        for _ in tqdm.tqdm(range(5), desc="Warm up YOLO segmenter model"):
-            dummy = [np.zeros((self.imgsz, self.imgsz, 3), np.uint8)]
-            _ = self.model(dummy, imgsz=self.imgsz, verbose=False)
+        for idx, m in enumerate(self.models):
+            for _ in tqdm.tqdm(
+                range(5),
+                desc=f"Warm up YOLO segmenter [{idx + 1}/{len(self.models)}]",
+            ):
+                dummy = [np.zeros((m["imgsz"], m["imgsz"], 3), np.uint8)]
+                _ = m["model"](dummy, imgsz=m["imgsz"], verbose=False)
 
     def infer_patches(
         self,
@@ -37,61 +78,82 @@ class Segmenter:
         if len(patches) == 0:
             return []
 
-        results = self.model(
-            patches,
-            imgsz=self.imgsz,
-            verbose=False,
-        )
+        # Polygons unified by class name across all models.
+        class_polys: Dict[str, List[Tuple[np.ndarray, float, float]]] = {}
+        # name -> {"class_id", "name", "color"}, assigned in first-seen order.
+        unified_classes: Dict[str, Dict[str, Any]] = {}
 
-        class_polys: Dict[int, List[Tuple[np.ndarray, float, float]]] = {}
+        for m in self.models:
+            classes_cfg: Dict[int, Dict[str, Any]] = m["classes"]
+            conf_threshold: float = m["conf_threshold"]
 
-        for r, (x1, y1, W, H) in zip(results, offsets):
+            results = m["model"](
+                patches,
+                imgsz=m["imgsz"],
+                verbose=False,
+            )
 
-            if r.masks is None:
-                continue
+            for r, (x1, y1, W, H) in zip(results, offsets):
 
-            for mask, cls_id, conf in zip(
-                r.masks.xy,
-                r.boxes.cls,
-                r.boxes.conf,
-            ):
-                conf = float(conf)
-                if conf < self.conf_threshold:
+                if r.masks is None:
                     continue
 
-                cls_id = int(cls_id)
+                for mask, cls_id, conf in zip(
+                    r.masks.xy,
+                    r.boxes.cls,
+                    r.boxes.conf,
+                ):
+                    conf = float(conf)
+                    if conf < conf_threshold:
+                        continue
 
-                polygon_patch = np.array(mask)
+                    cls_id = int(cls_id)
 
-                polygon_global = polygon_patch.copy()
-                polygon_global[:, 0] += x1
-                polygon_global[:, 1] += y1
-                polygon_global = polygon_global.astype(np.float32)
+                    cls_info = classes_cfg.get(cls_id)
+                    if cls_info is None or cls_info.get("pass", False):
+                        # this model opted out of this class
+                        continue
 
-                area = cv2.contourArea(polygon_global)
+                    name = cls_info["name"]
+                    if name not in unified_classes:
+                        unified_classes[name] = {
+                            "class_id": len(unified_classes),
+                            "name": name,
+                            "color": cls_info.get("color") or (0, 0, 255),
+                        }
 
-                class_polys.setdefault(cls_id, []).append(
-                    (polygon_global, conf, area)
-                )
+                    polygon_patch = np.array(mask)
+
+                    polygon_global = polygon_patch.copy()
+                    polygon_global[:, 0] += x1
+                    polygon_global[:, 1] += y1
+                    polygon_global = polygon_global.astype(np.float32)
+
+                    area = cv2.contourArea(polygon_global)
+
+                    class_polys.setdefault(name, []).append(
+                        (polygon_global, conf, area)
+                    )
 
         return self._merge_polygons_by_class(
             class_polys,
+            unified_classes,
             full_w,
             full_h,
         )
 
     def _merge_polygons_by_class(
         self,
-        class_polys: Dict[int, List[Tuple[np.ndarray, float, float]]],
+        class_polys: Dict[str, List[Tuple[np.ndarray, float, float]]],
+        unified_classes: Dict[str, Dict[str, Any]],
         W: int,
         H: int,
     ) -> List[Segmentation]:
 
         region_segments: List[Segmentation] = []
 
-        for cls_id, polys in class_polys.items():
-            if self.classes[cls_id]["pass"]:
-                continue
+        for cls_name, polys in class_polys.items():
+            cls_info = unified_classes[cls_name]
 
             mask = np.zeros((H, W), dtype=np.uint8)
 
@@ -178,9 +240,9 @@ class Segmenter:
                         confidence=confidence,
                         area=area,
                         area_n=area_n,
-                        class_id=cls_id,
-                        class_name=self.classes[cls_id]["name"],
-                        color=(0, 0, 255),
+                        class_id=cls_info["class_id"],
+                        class_name=cls_name,
+                        color=cls_info.get("color") or (0, 0, 255),
                     )
                 )
 

@@ -96,13 +96,11 @@ class Detector:
             self.region_classifier = None
 
         if config['segmenter'] is not None:
+            seg_cfg = config["segmenter"]
+            # backward-compat: single-model dict -> wrap into list
+            seg_models = [seg_cfg] if isinstance(seg_cfg, dict) else list(seg_cfg)
             self.region_segmenter = RegionSegmenterAdapter(
-                Segmenter(
-                checkpoint_path=config["segmenter"]["checkpoint"],
-                imgsz=config["segmenter"]["imgsz"],
-                conf_threshold=config["segmenter"]["threshold"],
-                classes=config["segmenter"]["classes"],
-                )
+                Segmenter(models=seg_models)
             )
         else:
             self.region_segmenter = None
