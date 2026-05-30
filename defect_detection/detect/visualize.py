@@ -81,7 +81,7 @@ def visualize(
     else:
         vis_img = draw_bboxes_xyxyn(
             image=vis_img,
-            bboxes_xyxyn=[region.bboxes_xyxy_n for region in anomaly.regions if region.class_name == "foreign"],
+            bboxes_xyxyn=[region.bboxes_xyxy_n for idx, region in enumerate(anomaly.regions) if anomaly_cls.regions[idx].class_name == "foreign"],
             labels=[f"{region.class_name} {region.confidence:.2f}" for region in anomaly_cls.regions if region.class_name == "foreign"],
             colors=[region.color for region in anomaly_cls.regions if region.class_name == "foreign"],
             is_draw=[not region.is_pass for region in anomaly_cls.regions if region.class_name == "foreign"] if not show_pass_classes else None,
