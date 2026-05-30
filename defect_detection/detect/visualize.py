@@ -76,6 +76,19 @@ def visualize(
             font_scale=2,
             font_thickness=2,
         )
+
+    # TODO: 점이물 하드 코딩, 추후 개선
+    else:
+        vis_img = draw_bboxes_xyxyn(
+            image=vis_img,
+            bboxes_xyxyn=[region.bboxes_xyxy_n for region in anomaly.regions if region.class_name == "foreign"],
+            labels=[f"{region.class_name} {region.confidence:.2f}" for region in anomaly_cls.regions if region.class_name == "foreign"],
+            colors=[region.color for region in anomaly_cls.regions if region.class_name == "foreign"],
+            is_draw=[not region.is_pass for region in anomaly_cls.regions if region.class_name == "foreign"] if not show_pass_classes else None,
+            thickness=5,
+            font_scale=2,
+            font_thickness=2,
+        )
     
     # draw segmentation regions
     if show_segmentation_regions_polygon:

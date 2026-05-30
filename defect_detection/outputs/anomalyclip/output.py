@@ -239,9 +239,10 @@ class AnomalyCLIPOutput:
 def merge_anomlay_outputs(outputs: List[AnomalyCLIPOutput]) -> AnomalyCLIPOutput:
     assert len(outputs) > 0
 
-    batch_size = len(outputs[0].maps)
+    first_output = next(o for o in outputs if o is not None)
+    batch_size = len(first_output.maps)
 
-    dummy_maps = np.zeros_like(outputs[0].maps, dtype=np.float32)
+    dummy_maps = np.zeros_like(first_output.maps, dtype=np.float32)
 
     merged = AnomalyCLIPOutput(
         maps=dummy_maps,

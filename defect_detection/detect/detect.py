@@ -4,7 +4,7 @@ from typing import List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
-from defect_detection.models import AnomalyCLIPInference, BackgroundRemover, Classifier, RegionClassifierAdapter, Segmenter, RegionSegmenterAdapter, ObjectDetector, Cluster
+from defect_detection.models import AnomalyCLIPInference, BackgroundRemover, Classifier, RegionClassifierAdapter, Segmenter, RegionSegmenterAdapter, ObjectDetector, TiledObjectDetector, Cluster
 from defect_detection.outputs import RegionClassificationOutput, ClassificationBatchItem, Classification, merge_anomlay_outputs, filter_by_cluster, merge_cls_outputs
 from defect_detection.utils import load_config, random_color
 from .result import DetectorOutput
@@ -59,6 +59,22 @@ class Detector:
             )
         else:
             self.dot_detector2 = None
+
+        if config['tile_detector'] is not None:
+            self.tile_detector = TiledObjectDetector(
+                checkpoint_path=config["tile_detector"]["checkpoint"],
+                imgsz=config["tile_detector"]["imgsz"],
+                threshold=config["tile_detector"]["threshold"],
+                name="tile_detector",
+                tile_overlap_x=config["tile_detector"]["tile_overlap_x"],
+                tile_overlap_y=config["tile_detector"]["tile_overlap_y"],
+                roi_left=config["tile_detector"]["roi_left"],
+                roi_right=config["tile_detector"]["roi_right"],
+                roi_top=config["tile_detector"]["roi_top"],
+                roi_bottom=config["tile_detector"]["roi_bottom"],
+            )
+        else:
+            self.tile_detector = None
 
         if config['dot_cluster'] is not None:
             self.region_dot_cluster = RegionClassifierAdapter(
@@ -150,39 +166,53 @@ class Detector:
 
         # (Optional, Independent from Anomaly) dot detection
         dot1 = self.dot_detector1.infer(foreground.images, conf_thresholds=dot_confs) if self.dot_detector1 is not None else None
-        dot2 = self.dot_detector2.infer(foreground.images, conf_thresholds=dot_confs) if self.dot_detector2 is not None else None
-        merged_dot = merge_anomlay_outputs([dot1, dot2]) if dot1 is not None else None
         t8 = time.time()
 
-        dot_clusters = self.region_dot_cluster.infer(images, merged_dot) if self.region_dot_cluster is not None else (RegionClassificationOutput([[Classification(class_id=-1, class_name="foreign", confidence=float(r.confidence), is_pass=False, color=(0, 0, 255)) for r in regions] for regions in merged_dot.batch_regions]) if merged_dot is not None else None)
-        merged_dot = filter_by_cluster(merged_dot, dot_clusters) if dot_clusters is not None else merged_dot
+        dot2 = self.dot_detector2.infer(foreground.images, conf_thresholds=dot_confs) if self.dot_detector2 is not None else None
         t9 = time.time()
 
-        dot_cls = self.region_dot_classifier.infer(images, merged_dot) if self.region_dot_classifier is not None else dot_clusters
+        dot3 = self.tile_detector.infer(foreground.images, conf_thresholds=dot_confs) if self.tile_detector is not None else None
         t10 = time.time()
+
+        merged_dot = merge_anomlay_outputs([dot1, dot2, dot3])
+        t11 = time.time()
+
+        # TODO: 점이물 하드 코딩, 추후 개선
+        dot_clusters = self.region_dot_cluster.infer(images, merged_dot) if self.region_dot_cluster is not None else (RegionClassificationOutput([[Classification(class_id=-1, class_name="foreign", confidence=float(r.confidence), is_pass=False, color=(0, 0, 255)) for r in regions] for regions in merged_dot.batch_regions]) if merged_dot is not None else None)
+        merged_dot = filter_by_cluster(merged_dot, dot_clusters) if dot_clusters is not None else merged_dot
+        t12 = time.time()
+
+        dot_cls = self.region_dot_classifier.infer(images, merged_dot) if self.region_dot_classifier is not None else dot_clusters
+        t13 = time.time()
         
         # Merge Anomaly's and Dot Detection's Classifications
         merged_anomaly = merge_anomlay_outputs([anomaly, merged_dot])
         merged_cls = merge_cls_outputs([anomaly_cls, dot_cls])
-        t11 = time.time()
+        t14 = time.time()
 
         # TODO:
         # Merge Segmentation and Dot Detection
 
+        print(f"load images          : {(t1  - t0 ) * 1000:.1f} ms")
+        print(f"foreground           : {(t2  - t1 ) * 1000:.1f} ms")
+        print(f"anomaly              : {(t3  - t2 ) * 1000:.1f} ms")
+        print(f"anomaly_cluster      : {(t4  - t3 ) * 1000:.1f} ms")
+        print(f"classification       : {(t5  - t4 ) * 1000:.1f} ms")
+        print(f"segmentation         : {(t6  - t5 ) * 1000:.1f} ms")
+        print(f"segmentation_cls     : {(t7  - t6 ) * 1000:.1f} ms")
 
-        print(f"load images: {(t1-t0)*1000}ms")
-        print(f"foreground: {(t2-t1)*1000}ms")
-        print(f"anomaly: {(t3-t2)*1000}ms")
-        print(f"anomaly_cluster: {(t4-t3)*1000}ms")
-        print(f"classification: {(t5-t4)*1000}ms")
-        print(f"segmentation: {(t6-t5)*1000}ms")
-        print(f"segmentation_cls: {(t7-t6)*1000}ms")
-        print(f"dot1: {(t8-t7)*1000}ms")
-        print(f"dot2: {(t9-t8)*1000}ms")
-        print(f"dot_cluster: {(t10-t9)*1000}ms")
-        print(f"dot_classification: {(t11-t10)*1000}ms")
-        print(f"image count: {len(images)}")
-        print(f"total: {(t11-t0)*1000}ms")
+        print(f"dot1                 : {(t8  - t7 ) * 1000:.1f} ms")
+        print(f"dot2                 : {(t9  - t8 ) * 1000:.1f} ms")
+        print(f"tile_detector        : {(t10 - t9 ) * 1000:.1f} ms")
+
+        print(f"merge_dot            : {(t11 - t10) * 1000:.1f} ms")
+        print(f"dot_cluster          : {(t12 - t11) * 1000:.1f} ms")
+        print(f"dot_classification   : {(t13 - t12) * 1000:.1f} ms")
+
+        print(f"merge_final          : {(t14 - t13) * 1000:.1f} ms")
+
+        print(f"image count          : {len(images)}")
+        print(f"total                : {(t14 - t0) * 1000:.1f} ms")
 
         return DetectorOutput(
             images=images,
