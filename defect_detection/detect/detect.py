@@ -174,7 +174,7 @@ class Detector:
         dot3 = self.tile_detector.infer(foreground.images, conf_thresholds=dot_confs) if self.tile_detector is not None else None
         t10 = time.time()
 
-        merged_dot = merge_anomlay_outputs([dot1, dot2, dot3])
+        merged_dot = merge_anomlay_outputs([x for x in (dot1, dot2, dot3) if x is not None]) if any(x is not None for x in (dot1, dot2, dot3)) else None
         t11 = time.time()
 
         # TODO: 점이물 하드 코딩, 추후 개선
