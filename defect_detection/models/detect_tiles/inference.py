@@ -295,6 +295,7 @@ class TiledObjectDetector:
         conf_thresholds: Optional[
             Sequence[Optional[float]]
         ] = None,
+        foreground_masks: Optional[np.ndarray] = None,
     ):
         if (
             conf_thresholds is not None
@@ -327,6 +328,17 @@ class TiledObjectDetector:
             )
 
         maps = np.stack(maps)
+
+        # maps_np = maps.cpu().numpy().astype(np.float32)
+        if foreground_masks is not None:
+            m = np.asarray(foreground_masks, dtype=np.float32)
+            if m.ndim == 2:
+                m = m[np.newaxis, :, :]
+            if m.shape != maps.shape:
+                raise ValueError(
+                    f"foreground_masks shape {m.shape} != maps shape {maps.shape}"
+                )
+            maps = maps * m
 
         return AnomalyCLIPOutput(
             maps=maps,
