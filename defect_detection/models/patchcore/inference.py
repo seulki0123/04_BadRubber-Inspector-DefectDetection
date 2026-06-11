@@ -135,8 +135,41 @@ class PatchcoreDetector:
             out.append(torch.cdist(p[s:s + self.NN_CHUNK], self.bank).min(1).values)
         return torch.cat(out)
 
+    def _reduce_score(
+        self,
+        d: torch.Tensor,
+        mask: Optional[np.ndarray],
+    ) -> float:
+        """패치별 최소거리 d(=(P,)) 중 최대값을 이미지 점수로 반환.
+
+        foreground mask 가 주어지면 배경 패치는 제외하고 foreground 패치들에
+        대해서만 max 를 취해 배경 score 가 섞이지 않게 한다.
+        """
+        if mask is None:
+            return float(d.max())
+
+        p = int(d.shape[0])
+        g = int(round(p ** 0.5))
+        if g * g != p:
+            # 패치 그리드(정사각형) 복원 불가 → 마스킹 생략
+            return float(d.max())
+
+        # 원본 해상도 mask → 패치 그리드(g x g) 로 축소 (NEAREST 로 0/1 유지)
+        m = cv2.resize(
+            mask.astype(np.float32), (g, g), interpolation=cv2.INTER_NEAREST
+        )
+        fg = torch.from_numpy(m > 0.5).reshape(-1).to(d.device)
+        if not bool(fg.any()):
+            # foreground 패치가 하나도 없으면 전체 패치로 fallback
+            return float(d.max())
+        return float(d[fg].max())
+
     @torch.no_grad()
-    def _raw_scores(self, images: Sequence[np.ndarray]) -> List[float]:
+    def _raw_scores(
+        self,
+        images: Sequence[np.ndarray],
+        foreground_masks: Optional[Sequence[np.ndarray]] = None,
+    ) -> List[float]:
         tens = []
         for img in images:
             im = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -146,7 +179,13 @@ class PatchcoreDetector:
         xb = torch.stack(tens).to(self.device)
         xb = (xb - self._mean) / self._std
         pb = self._embed(xb)
-        return [float(self._patch_min(pb[j]).max()) for j in range(pb.shape[0])]
+        return [
+            self._reduce_score(
+                self._patch_min(pb[j]),
+                None if foreground_masks is None else foreground_masks[j],
+            )
+            for j in range(pb.shape[0])
+        ]
 
     @staticmethod
     def _center_bbox(
@@ -165,7 +204,11 @@ class PatchcoreDetector:
     # ------------------------------------------------------------------
     # Main API
     # ------------------------------------------------------------------
-    def infer(self, images: Sequence[np.ndarray]) -> PatchcoreOutput:
+    def infer(
+        self,
+        images: Sequence[np.ndarray],
+        foreground_masks: Optional[Sequence[np.ndarray]] = None,
+    ) -> PatchcoreOutput:
         # 합격선 결정 (infer_nbr.py 와 동일)
         #   score_threshold(=args.z) 지정 시 → raw 환산: thr = mu + z * sd
         #   미지정(None) 시            → json 의 p99(suggest_thr_p99) fallback
@@ -173,7 +216,7 @@ class PatchcoreDetector:
             thr = self.mu + self.score_threshold * self.sd
         else:
             thr = self.thr_p99
-        scores = self._raw_scores(images)
+        scores = self._raw_scores(images, foreground_masks)
 
         batch: List[List[Patchcore]] = []
         for img, raw in zip(images, scores):

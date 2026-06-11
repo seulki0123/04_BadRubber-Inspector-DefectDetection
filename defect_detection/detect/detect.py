@@ -200,7 +200,7 @@ class Detector:
         merged_cls = merge_cls_outputs([anomaly_cls, dot_cls])
         t14 = time.time()
 
-        patchcore = self.patchcore.infer(images) if self.patchcore is not None else None
+        patchcore = self.patchcore.infer(images, foreground.masks) if self.patchcore is not None else None
         t15 = time.time()
 
         # TODO:
