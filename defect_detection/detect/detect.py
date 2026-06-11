@@ -139,11 +139,16 @@ class Detector:
         self,
         images: List[np.ndarray],
         dot_confs: Optional[Sequence[Optional[float]]] = None,
+        patchcore_active: Optional[Sequence[Optional[bool]]] = None,
     ) -> DetectorOutput:
         t0 = time.time()
         if dot_confs is not None and len(images) != len(dot_confs):
             raise ValueError(
                 f"len(images) ({len(images)}) must equal len(dot_confs) ({len(dot_confs)})"
+            )
+        if patchcore_active is not None and len(images) != len(patchcore_active):
+            raise ValueError(
+                f"len(images) ({len(images)}) must equal len(patchcore_active) ({len(patchcore_active)})"
             )
 
         # read images
@@ -200,7 +205,7 @@ class Detector:
         merged_cls = merge_cls_outputs([anomaly_cls, dot_cls])
         t14 = time.time()
 
-        patchcore = self.patchcore.infer(images, foreground.masks) if self.patchcore is not None else None
+        patchcore = self.patchcore.infer(images, foreground.masks, active_by_side=patchcore_active) if self.patchcore is not None else None
         t15 = time.time()
 
         # TODO:

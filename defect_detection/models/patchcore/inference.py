@@ -192,7 +192,7 @@ class PatchcoreDetector:
         img: np.ndarray,
     ) -> Tuple[Tuple[int, int, int, int], Tuple[float, float, float, float]]:
         H, W = img.shape[:2]
-        xyxy_n = (0.1, 0.05, 0.95, 0.9)
+        xyxy_n = (0.1, 0.05, 0.9, 0.95)
         xyxy = (
             int(xyxy_n[0] * W),
             int(xyxy_n[1] * H),
@@ -208,6 +208,7 @@ class PatchcoreDetector:
         self,
         images: Sequence[np.ndarray],
         foreground_masks: Optional[Sequence[np.ndarray]] = None,
+        active_by_side: Optional[Sequence[Optional[bool]]] = None,
     ) -> PatchcoreOutput:
         # 합격선 결정 (infer_nbr.py 와 동일)
         #   score_threshold(=args.z) 지정 시 → raw 환산: thr = mu + z * sd
@@ -216,12 +217,32 @@ class PatchcoreDetector:
             thr = self.mu + self.score_threshold * self.sd
         else:
             thr = self.thr_p99
-        scores = self._raw_scores(images, foreground_masks)
+
+        # side 별 활성화 여부 결정 (None=지정 안 됨 → 활성)
+        def _is_active(i: int) -> bool:
+            if active_by_side is None or active_by_side[i] is None:
+                return True
+            return bool(active_by_side[i])
+
+        active_idx = [i for i in range(len(images)) if _is_active(i)]
+
+        # 활성화된 이미지만 모델에 통과시켜 점수 계산 (시간 이득)
+        scores = [0.0] * len(images)
+        if active_idx:
+            active_images = [images[i] for i in active_idx]
+            active_masks = (
+                None if foreground_masks is None
+                else [foreground_masks[i] for i in active_idx]
+            )
+            active_scores = self._raw_scores(active_images, active_masks)
+            for i, s in zip(active_idx, active_scores):
+                scores[i] = float(s)
 
         batch: List[List[Patchcore]] = []
-        for img, raw in zip(images, scores):
+        for idx, img in enumerate(images):
             regions: List[Patchcore] = []
-            if raw >= thr:  # 점수가 비정상적으로 높음 → 'etc'
+            raw = scores[idx]
+            if _is_active(idx) and raw >= thr:  # 활성화된 side 이면서 점수가 비정상적으로 높음 → 'etc'
                 xyxy, xyxy_n = self._center_bbox(img)
                 regions.append(
                     Patchcore(
