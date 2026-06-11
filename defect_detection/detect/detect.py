@@ -4,7 +4,7 @@ from typing import List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
-from defect_detection.models import AnomalyCLIPInference, BackgroundRemover, Classifier, RegionClassifierAdapter, Segmenter, RegionSegmenterAdapter, ObjectDetector, TiledObjectDetector, Cluster
+from defect_detection.models import AnomalyCLIPInference, BackgroundRemover, Classifier, RegionClassifierAdapter, Segmenter, RegionSegmenterAdapter, ObjectDetector, TiledObjectDetector, Cluster, PatchcoreDetector
 from defect_detection.outputs import RegionClassificationOutput, ClassificationBatchItem, Classification, merge_anomlay_outputs, filter_by_cluster, merge_cls_outputs
 from defect_detection.utils import load_config, random_color
 from .result import DetectorOutput
@@ -111,6 +111,16 @@ class Detector:
         else:
             self.region_classifier = None
 
+        if config.get('patchcore') is not None:
+            self.patchcore = PatchcoreDetector(
+                checkpoint_path=config["patchcore"]["checkpoint"],
+                holdout_path=config["patchcore"]["holdout"],
+                score_threshold=config["patchcore"]["threshold"],
+                imgsz=config["patchcore"]["imgsz"],
+            )
+        else:
+            self.patchcore = None
+
         if config['segmenter'] is not None:
             seg_cfg = config["segmenter"]
             # backward-compat: single-model dict -> wrap into list
@@ -190,6 +200,9 @@ class Detector:
         merged_cls = merge_cls_outputs([anomaly_cls, dot_cls])
         t14 = time.time()
 
+        patchcore = self.patchcore.infer(images) if self.patchcore is not None else None
+        t15 = time.time()
+
         # TODO:
         # Merge Segmentation and Dot Detection
 
@@ -210,9 +223,10 @@ class Detector:
         print(f"dot_classification   : {(t13 - t12) * 1000:.1f} ms")
 
         print(f"merge_final          : {(t14 - t13) * 1000:.1f} ms")
+        print(f"patchcore            : {(t15 - t14) * 1000:.1f} ms")
 
         print(f"image count          : {len(images)}")
-        print(f"total                : {(t14 - t0) * 1000:.1f} ms")
+        print(f"total                : {(t15 - t0) * 1000:.1f} ms")
 
         return DetectorOutput(
             images=images,
@@ -221,5 +235,6 @@ class Detector:
             anomaly_cls=merged_cls,
             segmentation=segmentation,
             segmentation_cls=segmentation_cls,
+            patchcore=patchcore,
             show=self.show,
         )

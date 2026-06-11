@@ -2,7 +2,7 @@ from typing import Sequence, Optional
 import numpy as np
 import cv2
 
-from defect_detection.outputs import ForegroundMaskBatchItem, AnomalyCLIPBatchItem, ClassificationBatchItem, SegmentationBatchItem
+from defect_detection.outputs import ForegroundMaskBatchItem, AnomalyCLIPBatchItem, ClassificationBatchItem, SegmentationBatchItem, PatchcoreBatchItem
 
 
 def visualize(
@@ -12,6 +12,7 @@ def visualize(
     anomaly_cls: ClassificationBatchItem,
     segmentation: SegmentationBatchItem,
     segmentation_cls: ClassificationBatchItem,
+    patchcore: Optional[PatchcoreBatchItem] = None,
     show_foreground: bool = True,
     show_anomaly_map: bool = True,
     show_anomaly_score: bool = True,
@@ -19,6 +20,7 @@ def visualize(
     show_anomaly_regions_bbox: bool = True,
     show_segmentation_regions_polygon: bool = True,
     show_segmentation_regions_bbox: bool = True,
+    show_patchcore: bool = True,
     show_pass_classes: bool = True,
 ) -> np.ndarray:
 
@@ -136,6 +138,19 @@ def visualize(
                     font_scale=2,
                     font_thickness=2,
                 )
+
+    # draw patchcore('etc') 전역 이상점수 박스 (anomaly/segmentation 과 독립)
+    if show_patchcore and patchcore is not None and len(patchcore) > 0:
+        items = [p for p in patchcore if not p.is_pass]
+        vis_img = draw_bboxes_xyxyn(
+            image=vis_img,
+            bboxes_xyxyn=[p.bboxes_xyxy_n for p in items],
+            labels=[f"{p.class_name} {p.confidence:.1f}" for p in items],
+            colors=[p.color for p in items],
+            thickness=5,
+            font_scale=2,
+            font_thickness=2,
+        )
 
     return vis_img
 

@@ -11,6 +11,8 @@ from defect_detection.outputs import (
     SegmentationBatchItem,
     AnomalyCLIPBatchItem,
     ForegroundMaskBatchItem,
+    PatchcoreOutput,
+    PatchcoreBatchItem,
 )
 from .visualize import visualize
 
@@ -27,6 +29,7 @@ class DetectorBatchItem:
     anomaly_cls: ClassificationBatchItem
     segmentation: SegmentationBatchItem
     segmentation_cls: ClassificationBatchItem
+    patchcore: Optional[PatchcoreBatchItem] = None
     show: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -42,6 +45,7 @@ class DetectorBatchItem:
             anomaly_cls=self.anomaly_cls,
             segmentation=self.segmentation,
             segmentation_cls=self.segmentation_cls,
+            patchcore=self.patchcore,
             show_foreground=show.get("foreground", False),
             show_anomaly_map=show.get("anomaly_map", False),
             show_anomaly_score=show.get("anomaly_score", False),
@@ -49,6 +53,7 @@ class DetectorBatchItem:
             show_anomaly_regions_bbox=show.get("anomaly_regions_bbox", False),
             show_segmentation_regions_polygon=show.get("segmentation_regions_polygon", False),
             show_segmentation_regions_bbox=show.get("segmentation_regions_bbox", False),
+            show_patchcore=show.get("patchcore", False),
             show_pass_classes=show.get("show_pass_classes", False),
         )
 
@@ -65,6 +70,7 @@ class DetectorOutput:
     anomaly_cls: ClassificationBatchItem
     segmentation: SegmentationOutput
     segmentation_cls: ClassificationBatchItem
+    patchcore: Optional[PatchcoreOutput] = None
     show: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -87,6 +93,10 @@ class DetectorOutput:
             if len(self.segmentation_cls) != B:
                 raise ValueError("Segmentation classification batch size mismatch")
 
+        if self.patchcore is not None:
+            if len(self.patchcore) != B:
+                raise ValueError("Patchcore batch size mismatch")
+
     def __len__(self):
         return len(self.images)
 
@@ -102,5 +112,6 @@ class DetectorOutput:
             anomaly_cls=self.anomaly_cls[idx],
             segmentation=self.segmentation[idx] if self.segmentation is not None else None,
             segmentation_cls=self.segmentation_cls[idx] if self.segmentation_cls is not None else None,
+            patchcore=self.patchcore[idx] if self.patchcore is not None else None,
             show=self.show,
         )
