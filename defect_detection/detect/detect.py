@@ -114,6 +114,7 @@ class Detector:
         if config.get('patchcore') is not None:
             self.patchcore = PatchcoreDetector(
                 checkpoint_path=config["patchcore"]["checkpoint"],
+                backbone_path=config["patchcore"]["backbone"],
                 holdout_path=config["patchcore"]["holdout"],
                 score_threshold=config["patchcore"]["threshold"],
                 imgsz=config["patchcore"]["imgsz"],

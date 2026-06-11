@@ -45,11 +45,16 @@ class PatchcoreDetector:
         imgsz: int,
         device: Optional[str] = None,
         color: Tuple[int, int, int] = (0, 0, 255),
+        backbone_path: Optional[str] = None,
     ) -> None:
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"patchcore: 모델(메모리뱅크) 파일 없음: {checkpoint_path}")
         if not os.path.exists(holdout_path):
             raise FileNotFoundError(f"patchcore: holdout(합격선) 파일 없음: {holdout_path}")
+        # 백본 사전학습 가중치 로컬 경로(있으면 timm 다운로드 대신 사용)
+        if backbone_path and not os.path.exists(backbone_path):
+            raise FileNotFoundError(f"patchcore: backbone 가중치 파일 없음: {backbone_path}")
+        self.backbone_path = backbone_path or None
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         # score_threshold == infer_nbr.py 의 args.z (z-score 합격선)
@@ -82,6 +87,12 @@ class PatchcoreDetector:
     # 모델 로딩 / 임베딩 (infer_nbr.py load_model/embed 와 동일)
     # ------------------------------------------------------------------
     def _build_backbone(self, m: dict) -> None:
+        # backbone_path 가 지정되면 timm 자동 다운로드 대신 로컬 파일을 사용
+        overlay = (
+            {"pretrained_cfg_overlay": dict(file=self.backbone_path)}
+            if self.backbone_path
+            else {}
+        )
         if self.btype == "cnn":
             self.backbone = (
                 timm.create_model(
@@ -89,6 +100,7 @@ class PatchcoreDetector:
                     pretrained=True,
                     features_only=True,
                     out_indices=tuple(m["layers"]),
+                    **overlay,
                 )
                 .eval()
                 .to(self.device)
@@ -101,6 +113,7 @@ class PatchcoreDetector:
                     pretrained=True,
                     img_size=self.imgsz,
                     dynamic_img_size=True,
+                    **overlay,
                 )
                 .eval()
                 .to(self.device)
