@@ -89,8 +89,11 @@ class Cluster:
             h, w = image.shape[:2]
 
             if max_sims[i] < sim_threshold:
-                pred = "unknown_under_max_sim"
                 pred_score = 0.0
+                class_id = -1
+                class_name = "unknown"
+                color = (0, 0, 255)
+                is_pass = False
             else:
                 idxs = top_idx[i]
                 scores = top_vals[i]
@@ -98,11 +101,11 @@ class Cluster:
                 labels = [self.labels[j] for j in idxs]
                 pred, pred_score = self._weighted_vote(labels, scores)
 
-            class_information = self.classes[pred]
-            class_id = class_information["class_id"]
-            class_name = class_information["name"]
-            color = class_information["color"]
-            is_pass = class_information["pass"] or pred_score < self.threshold
+                class_information = self.classes[pred]
+                class_id = class_information["class_id"]
+                class_name = class_information["name"]
+                color = class_information["color"]
+                is_pass = class_information["pass"] or pred_score < self.threshold
             
             outputs.append({
                 "class_id": class_id,
