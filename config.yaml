@@ -1,22 +1,12 @@
 # Grade Selection-driven configuration for standalone DefectDetection runs.
-# The `production_information` block selects which profile is loaded from
-# `src/Profiles/profiles/registry.yaml`. `checkpoint_root` is the single
-# absolute path that every checkpoint inside a base profile is anchored to.
-#
-# Runtime tweak paths:
-#   - defect_detection.show        (deep-merged on top of profile show)
-#   - defect_detection.overrides   (checkpoint/threshold/classes tweaks)
-#
-# `return_mode` and `show` cannot appear inside `overrides:` -- use the
-# dedicated paths. class_id keys are immutable; inside a class entry only
-# name / color / pass / description can be overridden.
+# The `production_information` block selects the foundation profile by
+# convention -- `src/Profiles/profiles/products/<LINE>/_<grade>.py`. That module
+# supplies all classes/checkpoints/thresholds/`return_mode`/`show`; there is no
+# registry or override layer. `checkpoint_root` is the single absolute path
+# that every checkpoint inside a base profile is anchored to.
 
 checkpoint_root: /home/s1k2/04_BadRubber/nas/NAS/sub/LG_Chemistry/inspection
 
 production_information:
   line: BR-C
   grade: BR1280
-
-defect_detection:
-  overrides: {}
-  show: {}
