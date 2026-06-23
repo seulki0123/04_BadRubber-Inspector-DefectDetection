@@ -190,7 +190,7 @@ class Detector:
         dot3 = self.tile_detector.infer(images, conf_thresholds=dot_confs, foreground_masks=foreground.masks) if self.tile_detector is not None else None
         t10 = time.time()
 
-        merged_dot = merge_anomlay_outputs([x for x in (dot1, dot2, dot3) if x is not None]) if any(x is not None for x in (dot1, dot2, dot3)) else None
+        merged_dot = merge_anomlay_outputs([x for x in (dot1, dot2) if x is not None]) if any(x is not None for x in (dot1, dot2)) else None
         t11 = time.time()
 
         # TODO: 점이물 하드 코딩, 추후 개선
@@ -201,9 +201,11 @@ class Detector:
         dot_cls = self.region_dot_classifier.infer(images, merged_dot) if self.region_dot_classifier is not None else dot_clusters
         t13 = time.time()
         
+        tile_cls = RegionClassificationOutput([[Classification(class_id=-1, class_name="foreign", confidence=float(r.confidence), is_pass=False, color=(0, 0, 255)) for r in regions] for regions in dot3.batch_regions]) if dot3 is not None else None
+        
         # Merge Anomaly's and Dot Detection's Classifications
-        merged_anomaly = merge_anomlay_outputs([anomaly, merged_dot])
-        merged_cls = merge_cls_outputs([anomaly_cls, dot_cls])
+        merged_anomaly = merge_anomlay_outputs([anomaly, merged_dot, dot3])
+        merged_cls = merge_cls_outputs([anomaly_cls, dot_cls, tile_cls])
         t14 = time.time()
 
         patchcore = self.patchcore.infer(images, foreground.masks, active_by_side=patchcore_active) if self.patchcore is not None else None
