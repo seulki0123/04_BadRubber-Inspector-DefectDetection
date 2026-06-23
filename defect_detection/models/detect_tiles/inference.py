@@ -129,11 +129,45 @@ class TiledObjectDetector:
             starts.append(last)
 
         return starts
+        
+    @staticmethod
+    def _apply_bale_crop(
+        img: np.ndarray,
+        foreground_mask: Optional[np.ndarray],
+        x_offset: int,
+        y_offset: int,
+    ):
+        if foreground_mask is None:
+            raise ValueError(
+                "foreground_mask must be provided for TiledObjectDetector."
+            )
+
+        roi_mask = foreground_mask[
+            y_offset:y_offset + img.shape[0],
+            x_offset:x_offset + img.shape[1],
+        ]
+
+        ys, xs = np.where(roi_mask > 0.5)
+
+        if len(xs) == 0 or len(ys) == 0:
+            return img, x_offset, y_offset
+
+        x0 = int(xs.min())
+        x1 = int(xs.max()) + 1
+        y0 = int(ys.min())
+        y1 = int(ys.max()) + 1
+
+        return (
+            img[y0:y1, x0:x1],
+            x_offset + x0,
+            y_offset + y0,
+        )
 
     def _infer_single_map(
         self,
         img: np.ndarray,
         conf_threshold: float,
+        foreground_mask: Optional[np.ndarray]
     ) -> np.ndarray:
         h, w = img.shape[:2]
 
@@ -148,6 +182,13 @@ class TiledObjectDetector:
             self.roi_right,
             self.roi_top,
             self.roi_bottom,
+        )
+
+        roi_img, roi_x0, roi_y0 = self._apply_bale_crop(
+            roi_img,
+            foreground_mask,
+            roi_x0,
+            roi_y0,
         )
 
         roi_h, roi_w = roi_img.shape[:2]
@@ -297,6 +338,12 @@ class TiledObjectDetector:
         ] = None,
         foreground_masks: Optional[np.ndarray] = None,
     ):
+    
+        if foreground_masks is None:
+            raise ValueError(
+                f"{self.name}: foreground_masks must be provided."
+            )
+            
         if (
             conf_thresholds is not None
             and len(images) != len(conf_thresholds)
@@ -324,21 +371,11 @@ class TiledObjectDetector:
                 self._infer_single_map(
                     img,
                     conf_threshold,
+                    foreground_masks[idx],
                 )
             )
 
         maps = np.stack(maps)
-
-        # maps_np = maps.cpu().numpy().astype(np.float32)
-        if foreground_masks is not None:
-            m = np.asarray(foreground_masks, dtype=np.float32)
-            if m.ndim == 2:
-                m = m[np.newaxis, :, :]
-            if m.shape != maps.shape:
-                raise ValueError(
-                    f"foreground_masks shape {m.shape} != maps shape {maps.shape}"
-                )
-            maps = maps * m
 
         return AnomalyCLIPOutput(
             maps=maps,
