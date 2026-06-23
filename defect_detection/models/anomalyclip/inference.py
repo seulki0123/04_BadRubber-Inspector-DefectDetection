@@ -62,6 +62,8 @@ class AnomalyCLIPInference:
 
         self._load_model_and_prompt_learner()
         self._build_text_features()
+        self.capture_intermediates = False    # 기본 off — 메모리·시간 오버헤드 없음
+        self._last_intermediates = None       # infer() 호출마다 per-image dict 리스트로 채움
         self._warmup()
 
     # ------------------------------------------------
@@ -271,4 +273,20 @@ class AnomalyCLIPInference:
         )
         probs_list = [float(x) for x in image_abnormal_probs.cpu().numpy().reshape(-1)]
         object.__setattr__(out, "global_scores", probs_list)
+
+        if self.capture_intermediates:
+            pf_np = [pf.detach().cpu().numpy() for pf in patch_features]   # list of (B, N, D)
+            imf_np = image_features.detach().cpu().numpy()                  # (B, D)
+            amap_pre_np = anomaly_maps.detach().cpu().numpy()               # (B, H_in, W_in) pre-resize
+            batch_sz = imf_np.shape[0]
+            self._last_intermediates = [
+                {
+                    "patch_features": [pf[i] for pf in pf_np],
+                    "image_features": imf_np[i],
+                    "anomaly_map_pre_resize": amap_pre_np[i],
+                }
+                for i in range(batch_sz)
+            ]
+        else:
+            self._last_intermediates = None
         return out
