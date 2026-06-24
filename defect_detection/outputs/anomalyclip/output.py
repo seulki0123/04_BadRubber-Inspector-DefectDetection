@@ -108,14 +108,41 @@ class AnomalyCLIPOutput:
     ) -> List[AnomalyRegion]:
 
         H, W = amap.shape
-        amap = np.clip(amap.astype(np.float32), 0.0, 1.0)
+        raw = np.asarray(amap, dtype=np.float32)
+        raw = np.nan_to_num(raw, nan=0.0, posinf=0.0, neginf=0.0)
+        raw = np.clip(raw, 0.0, None)
+
+        # Normalize to [0, 1] for colormap-based region extraction.
+        # The raw anomaly map can have arbitrary small values (e.g. max ~0.2)
+        # that would map entirely to "blue" in JET without normalization,
+        # producing zero detected regions.
+        positive = raw[raw > 0]
+        if positive.size == 0:
+            return []
+
+        lo = float(np.percentile(positive, 5.0))
+        hi = float(np.percentile(positive, 99.5))
+        if hi <= lo:
+            lo = float(positive.min())
+            hi = float(positive.max())
+
+        if hi <= lo:
+            return []
+
+        amap_norm = np.clip((raw - lo) / (hi - lo), 0.0, 1.0).astype(np.float32)
+        amap_norm[raw <= 0] = 0.0
+
+        # Build raw-value score mask using score_threshold mapped back
+        # through the same normalization (so threshold 0.25 means ~top 25%
+        # of the positive value range, not absolute raw value).
+        norm_threshold = float(max(self.score_threshold, 0.0))
 
         # "시각화에서 빨간색으로 보이는 영역" 기준으로 마스크 생성.
-        color_ranges = HeatmapColorRanges(amap)
+        color_ranges = HeatmapColorRanges(amap_norm)
         binary = cv2.bitwise_or(color_ranges.red(), color_ranges.yellow())
 
         # score_threshold를 추가 하한으로 적용(원하면 0.0으로 두고 빨간색 기준만 사용 가능)
-        score_mask = (amap >= float(max(self.score_threshold, 0.0))).astype(np.uint8) * 255
+        score_mask = (amap_norm >= norm_threshold).astype(np.uint8) * 255
         binary = cv2.bitwise_and(binary, score_mask)
 
         # 작은 끊김/구멍을 줄여 bbox 누락 완화
@@ -154,7 +181,7 @@ class AnomalyCLIPOutput:
                 max(0.0, min(1.0, (y + h) / H)),
             )
 
-            score = self._compute_polygon_score(amap, polygon)
+            score = self._compute_polygon_score(amap_norm, polygon)
 
             regions.append(
                 AnomalyRegion(

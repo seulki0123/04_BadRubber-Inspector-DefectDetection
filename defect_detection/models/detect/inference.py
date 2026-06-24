@@ -4,7 +4,7 @@ import cv2
 import tqdm
 import numpy as np
 from ultralytics import YOLO
-from defect_detection.outputs import AnomalyCLIPOutput
+from defect_detection.outputs import AnomalyCLIPOutputOldVersion
 
 
 class ObjectDetector:
@@ -41,7 +41,7 @@ class ObjectDetector:
 
         maps = self._yolo_to_maps(results, images, conf_thresholds=conf_thresholds)
 
-        return AnomalyCLIPOutput(
+        return AnomalyCLIPOutputOldVersion(
             maps=maps,
             score_threshold=0.0,
             area_threshold=0,  # bbox는 작을 수 있으니 낮게

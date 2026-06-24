@@ -4,7 +4,7 @@ import numpy as np
 import tqdm
 from ultralytics import YOLO
 
-from defect_detection.outputs import AnomalyCLIPOutput
+from defect_detection.outputs import AnomalyCLIPOutputOldVersion
 
 
 _BG_COLORS = {
@@ -703,7 +703,7 @@ class TiledObjectDetector:
             axis=0,
         )
 
-        return AnomalyCLIPOutput(
+        return AnomalyCLIPOutputOldVersion(
             maps=maps,
             score_threshold=0.0,
             area_threshold=0,

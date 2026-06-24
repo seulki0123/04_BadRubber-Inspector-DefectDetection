@@ -8,5 +8,5 @@
 checkpoint_root: /home/s1k2/04_BadRubber/nas/NAS/sub/LG_Chemistry/inspection
 
 production_information:
-  line: BR-C
-  grade: BR1280
+  line: test_nbr
+  grade: test_nbr
