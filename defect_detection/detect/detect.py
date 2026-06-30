@@ -27,6 +27,10 @@ class Detector:
         self.bgremover = BackgroundRemover(
             checkpoint_path=config["bgremover"]["checkpoint"],
             imgsz=config["bgremover"]["imgsz"],
+            use_blur_mask=config["bgremover"]["use_blur_mask"],
+            blur_kernel=config["bgremover"]["blur_kernel"],
+            blur_threshold=config["bgremover"]["blur_threshold"],
+            blur_resize_scale=config["bgremover"]["blur_resize_scale"],
         )
 
         if config['anomaly_cluster'] is not None:
