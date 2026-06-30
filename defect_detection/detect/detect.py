@@ -27,6 +27,14 @@ class Detector:
         self.bgremover = BackgroundRemover(
             checkpoint_path=config["bgremover"]["checkpoint"],
             imgsz=config["bgremover"]["imgsz"],
+            mask_refine_mode=config["bgremover"].get("mask_refine_mode", "raw"),
+            mask_shrink_px=config["bgremover"].get("mask_shrink_px", 10),
+            mask_morph_kernel=config["bgremover"].get("mask_morph_kernel", 100),
+            quad_epsilon_min=config["bgremover"].get("quad_epsilon_min", 0.01),
+            quad_epsilon_max=config["bgremover"].get("quad_epsilon_max", 0.08),
+            quad_epsilon_steps=config["bgremover"].get("quad_epsilon_steps", 30),
+            blur_kernel=config["bgremover"].get("blur_kernel", 101),
+            blur_threshold=config["bgremover"].get("blur_threshold", 0.3),
         )
 
         if config['anomaly_cluster'] is not None:
