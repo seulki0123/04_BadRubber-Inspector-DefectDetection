@@ -15,12 +15,13 @@ class Segmenter:
         {
             "checkpoint": str,                # weights path
             "imgsz": int,                     # inference image size
-            "threshold": float,               # conf threshold (alias: conf_threshold)
+            "threshold": float,               # model-level default threshold
             "classes": {                      # this model's class table
                 <yolo_cls_id>: {
                     "name": str,
                     "color": tuple | None,
                     "pass": bool,             # True -> skip this class for this model
+                    "conf": float,             # optional per-class threshold
                     "description": str,       # (optional)
                 },
                 ...
@@ -47,12 +48,7 @@ class Segmenter:
                 {
                     "model": YOLO(cfg["checkpoint"]),
                     "imgsz": int(cfg.get("imgsz", 640)),
-                    "conf_threshold": float(
-                        cfg.get(
-                            "threshold",
-                            cfg.get("conf_threshold", 0.5),
-                        )
-                    ),
+                    "threshold": float(cfg.get("threshold", 0.5)),
                     "classes": cfg.get("classes") or {},
                 }
             )
@@ -85,7 +81,7 @@ class Segmenter:
 
         for m in self.models:
             classes_cfg: Dict[int, Dict[str, Any]] = m["classes"]
-            conf_threshold: float = m["conf_threshold"]
+            threshold: float = m["threshold"]
 
             results = m["model"](
                 patches,
@@ -104,14 +100,16 @@ class Segmenter:
                     r.boxes.conf,
                 ):
                     conf = float(conf)
-                    if conf < conf_threshold:
-                        continue
 
                     cls_id = int(cls_id)
 
                     cls_info = classes_cfg.get(cls_id)
                     if cls_info is None or cls_info.get("pass", False):
                         # this model opted out of this class
+                        continue
+
+                    class_threshold = float(cls_info.get("conf", threshold))
+                    if conf < class_threshold:
                         continue
 
                     name = cls_info["name"]
