@@ -1,4 +1,5 @@
-from typing import Optional, Sequence, List, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional, Sequence, List, Tuple, Union
 
 import numpy as np
 import tqdm
@@ -21,7 +22,7 @@ class TiledObjectDetector:
         imgsz: int = 2048,
         threshold: float = 0.3,
         iou_threshold: float = 0.5,
-        device: Optional[str] = None,
+        device: Union[str, Sequence[str], None] = None,
         name: str = "tiled_yolo",
         tile_overlap_x: float = 0.0,
         tile_overlap_y: float = 0.0,
@@ -36,12 +37,18 @@ class TiledObjectDetector:
         bg_margin_right: int = 0,
         bg_min_pixel: int = 8,
     ) -> None:
+        self.devices = (
+            list(device) if isinstance(device, (list, tuple)) else [device]
+        ) or [None]
         self.model = YOLO(checkpoint_path)
+        self.models = [self.model] + [
+            YOLO(checkpoint_path) for _ in range(max(0, len(self.devices) - 1))
+        ]
 
         self.imgsz = imgsz
         self.threshold = threshold
         self.iou_threshold = iou_threshold
-        self.device = device
+        self.device = self.devices[0]
         self.name = name
 
         self.tile_overlap_x = tile_overlap_x
@@ -77,14 +84,15 @@ class TiledObjectDetector:
                 for _ in range(batch_size)
             ]
 
-            _ = self.model.predict(
-                dummy_images,
-                imgsz=self.imgsz,
-                conf=self.threshold,
-                iou=self.iou_threshold,
-                device=self.device,
-                verbose=False,
-            )
+            for model, device in zip(self.models, self.devices):
+                _ = model.predict(
+                    dummy_images,
+                    imgsz=self.imgsz,
+                    conf=self.threshold,
+                    iou=self.iou_threshold,
+                    device=device,
+                    verbose=False,
+                )
 
     @staticmethod
     def _apply_roi(
@@ -402,6 +410,211 @@ class TiledObjectDetector:
 
         return boxes, scores, cls_ids
 
+    @staticmethod
+    def _empty_boxes() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return (
+            np.zeros((0, 4), dtype=np.float32),
+            np.zeros((0,), dtype=np.float32),
+            np.zeros((0,), dtype=np.int32),
+        )
+
+    @staticmethod
+    def _result_to_arrays(result) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if result.boxes is None or len(result.boxes) == 0:
+            return TiledObjectDetector._empty_boxes()
+
+        boxes = result.boxes.xyxy.cpu().numpy().astype(np.float32)
+        scores = result.boxes.conf.cpu().numpy().astype(np.float32)
+        cls_ids = result.boxes.cls.cpu().numpy().astype(np.int32)
+
+        return boxes, scores, cls_ids
+
+    def _predict_patches(
+        self,
+        patches: Sequence[np.ndarray],
+        conf_threshold: float,
+    ) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        if len(patches) == 0:
+            return []
+
+        if len(self.models) == 1 or len(patches) <= 1:
+            results = self.model.predict(
+                patches,
+                imgsz=self.imgsz,
+                conf=conf_threshold,
+                iou=self.iou_threshold,
+                device=self.device,
+                verbose=False,
+            )
+            return [self._result_to_arrays(result) for result in results]
+
+        outputs = [self._empty_boxes() for _ in patches]
+
+        def _run_group(group_idx: int) -> None:
+            indices = list(range(group_idx, len(patches), len(self.models)))
+            if not indices:
+                return
+
+            results = self.models[group_idx].predict(
+                [patches[idx] for idx in indices],
+                imgsz=self.imgsz,
+                conf=conf_threshold,
+                iou=self.iou_threshold,
+                device=self.devices[group_idx],
+                verbose=False,
+            )
+            for idx, result in zip(indices, results):
+                outputs[idx] = self._result_to_arrays(result)
+
+        with ThreadPoolExecutor(max_workers=len(self.models)) as executor:
+            list(executor.map(_run_group, range(len(self.models))))
+
+        return outputs
+
+    def _build_tiles(
+        self,
+        img: np.ndarray,
+        conf_threshold: float,
+        foreground_mask: Optional[np.ndarray],
+    ) -> Tuple[np.ndarray, int, int, List[Tuple[np.ndarray, int, int, int, int]]]:
+        roi_img, roi_x0, roi_y0 = self._apply_roi(
+            img,
+            self.roi_left,
+            self.roi_right,
+            self.roi_top,
+            self.roi_bottom,
+        )
+
+        roi_img, roi_x0, roi_y0 = self._apply_bale_crop(
+            roi_img,
+            foreground_mask,
+            roi_x0,
+            roi_y0,
+        )
+
+        h, w = roi_img.shape[:2]
+
+        if h <= self.imgsz and w <= self.imgsz:
+            return roi_img, roi_x0, roi_y0, [(roi_img, 0, 0, w, h)]
+
+        overlap_x = min(max(self.tile_overlap_x, 0.0), 0.5)
+        overlap_y = min(max(self.tile_overlap_y, 0.0), 0.5)
+
+        step_x = max(1, int(self.imgsz * (1.0 - overlap_x)))
+        step_y = max(1, int(self.imgsz * (1.0 - overlap_y)))
+
+        xs = self._tile_starts(w, self.imgsz, step_x)
+        ys = self._tile_starts(h, self.imgsz, step_y)
+
+        tiles = []
+        for y0 in ys:
+            y1 = min(y0 + self.imgsz, h)
+            for x0 in xs:
+                x1 = min(x0 + self.imgsz, w)
+                tile = roi_img[y0:y1, x0:x1]
+                th, tw = tile.shape[:2]
+
+                if th < self.imgsz or tw < self.imgsz:
+                    padded = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
+                    padded[:th, :tw] = tile
+                    tile = padded
+
+                tiles.append((tile, x0, y0, tw, th))
+
+        return roi_img, roi_x0, roi_y0, tiles
+
+    def _restore_tile_boxes(
+        self,
+        tile_results: Sequence[Tuple[np.ndarray, np.ndarray, np.ndarray]],
+        tiles: Sequence[Tuple[np.ndarray, int, int, int, int]],
+        roi_shape: Tuple[int, int],
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        h, w = roi_shape
+        all_boxes: List[np.ndarray] = []
+        all_scores: List[np.ndarray] = []
+        all_cls_ids: List[np.ndarray] = []
+
+        for (_, x0, y0, tw, th), (boxes, scores, cls_ids) in zip(
+            tiles,
+            tile_results,
+        ):
+            if len(boxes) == 0:
+                continue
+
+            valid_mask = (
+                (boxes[:, 0] < tw)
+                & (boxes[:, 1] < th)
+            )
+
+            boxes = boxes[valid_mask]
+            scores = scores[valid_mask]
+            cls_ids = cls_ids[valid_mask]
+
+            if len(boxes) == 0:
+                continue
+
+            boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]] + x0, 0, w)
+            boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]] + y0, 0, h)
+
+            all_boxes.append(boxes)
+            all_scores.append(scores)
+            all_cls_ids.append(cls_ids)
+
+        if not all_boxes:
+            return self._empty_boxes()
+
+        all_boxes_np = np.concatenate(all_boxes, axis=0)
+        all_scores_np = np.concatenate(all_scores, axis=0)
+        all_cls_ids_np = np.concatenate(all_cls_ids, axis=0)
+
+        keep = self._nms_numpy(
+            boxes=all_boxes_np,
+            scores=all_scores_np,
+            iou_thresh=self.iou_threshold,
+        )
+
+        return (
+            all_boxes_np[keep],
+            all_scores_np[keep],
+            all_cls_ids_np[keep],
+        )
+
+    @staticmethod
+    def _boxes_to_map(
+        img_shape: Tuple[int, int],
+        boxes: np.ndarray,
+        scores: np.ndarray,
+        roi_x0: int,
+        roi_y0: int,
+    ) -> np.ndarray:
+        h, w = img_shape
+        amap = np.zeros((h, w), dtype=np.float32)
+
+        if len(boxes) == 0:
+            return amap
+
+        boxes = boxes.copy()
+        boxes[:, [0, 2]] += roi_x0
+        boxes[:, [1, 3]] += roi_y0
+        boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, w)
+        boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, h)
+
+        for (bx1, by1, bx2, by2), score in zip(boxes, scores):
+            bx1 = int(np.clip(bx1, 0, w))
+            bx2 = int(np.clip(bx2, 0, w))
+            by1 = int(np.clip(by1, 0, h))
+            by2 = int(np.clip(by2, 0, h))
+
+            if bx2 <= bx1 or by2 <= by1:
+                continue
+
+            amap[by1:by2, bx1:bx2] = np.maximum(
+                amap[by1:by2, bx1:bx2],
+                float(score),
+            )
+
+        return amap
+
     def _infer_tiled_boxes(
         self,
         img: np.ndarray,
@@ -677,7 +890,9 @@ class TiledObjectDetector:
                 f"len(foreground_masks) ({len(masks)})"
             )
 
-        maps = []
+        tile_patches = []
+        tile_meta = []
+        side_infos = []
 
         for idx, img in enumerate(images):
             conf_threshold = self.threshold
@@ -690,11 +905,57 @@ class TiledObjectDetector:
                     conf_thresholds[idx]
                 )
 
+            roi_img, roi_x0, roi_y0, tiles = self._build_tiles(
+                img=img,
+                conf_threshold=conf_threshold,
+                foreground_mask=masks[idx],
+            )
+            side_infos.append((img.shape[:2], roi_img.shape[:2], roi_x0, roi_y0))
+
+            for tile_idx, (tile, x0, y0, tw, th) in enumerate(tiles):
+                tile_patches.append(tile)
+                tile_meta.append((idx, tile_idx, x0, y0, tw, th, conf_threshold))
+
+        tile_results = [self._empty_boxes() for _ in tile_patches]
+        thresholds = sorted({meta[-1] for meta in tile_meta})
+        for threshold in thresholds:
+            indices = [
+                idx
+                for idx, meta in enumerate(tile_meta)
+                if meta[-1] == threshold
+            ]
+            if not indices:
+                continue
+
+            results = self._predict_patches(
+                [tile_patches[idx] for idx in indices],
+                threshold,
+            )
+            for idx, result in zip(indices, results):
+                tile_results[idx] = result
+
+        results_by_side = [[] for _ in images]
+        tiles_by_side = [[] for _ in images]
+        for meta, result in zip(tile_meta, tile_results):
+            side_idx, _tile_idx, x0, y0, tw, th, _threshold = meta
+            results_by_side[side_idx].append(result)
+            tiles_by_side[side_idx].append((None, x0, y0, tw, th))
+
+        maps = []
+        for side_idx, img in enumerate(images):
+            img_shape, roi_shape, roi_x0, roi_y0 = side_infos[side_idx]
+            boxes, scores, _cls_ids = self._restore_tile_boxes(
+                results_by_side[side_idx],
+                tiles_by_side[side_idx],
+                roi_shape,
+            )
             maps.append(
-                self._infer_single_map(
-                    img=img,
-                    conf_threshold=conf_threshold,
-                    foreground_mask=masks[idx],
+                self._boxes_to_map(
+                    img_shape,
+                    boxes,
+                    scores,
+                    roi_x0,
+                    roi_y0,
                 )
             )
 

@@ -82,7 +82,7 @@ class Detector:
                 roi_right=config["tile_detector"]["roi_right"],
                 roi_top=config["tile_detector"]["roi_top"],
                 roi_bottom=config["tile_detector"]["roi_bottom"],
-                device=config["tile_detector"].get("device"),
+                device=config["tile_detector"].get("devices",config["tile_detector"].get("device"),),
             )
         else:
             self.tile_detector = None
