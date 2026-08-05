@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import time
 from typing import List, Optional, Sequence, Tuple
 
@@ -22,6 +23,7 @@ class Detector:
             imgsz=config["anomalyclip"]["imgsz"],
             score_threshold=config["anomalyclip"]["threshold"],
             area_threshold=config["anomalyclip"]["min_area"],
+            device=config["anomalyclip"].get("device"),
         )
 
         self.bgremover = BackgroundRemover(
@@ -31,6 +33,7 @@ class Detector:
             blur_kernel=config["bgremover"]["blur_kernel"],
             blur_threshold=config["bgremover"]["blur_threshold"],
             blur_resize_scale=config["bgremover"]["blur_resize_scale"],
+            device=config["bgremover"].get("device"),
         )
 
         if config['anomaly_cluster'] is not None:
@@ -39,6 +42,7 @@ class Detector:
                 checkpoints_path=config["anomaly_cluster"]["checkpoints_path"],
                 threshold=config["anomaly_cluster"]["threshold"],
                 classes=config["anomaly_cluster"]["classes"],
+                device=config["anomaly_cluster"].get("device"),
                 )
             )
         else:
@@ -50,6 +54,7 @@ class Detector:
                 imgsz=config["dot_detector1"]["imgsz"],
                 threshold=config["dot_detector1"]["threshold"],
                 name="dot_detector1",
+                device=config["dot_detector1"].get("device"),
             )
         else:
             self.dot_detector1 = None
@@ -60,6 +65,7 @@ class Detector:
                 imgsz=config["dot_detector2"]["imgsz"],
                 threshold=config["dot_detector2"]["threshold"],
                 name="dot_detector2",
+                device=config["dot_detector2"].get("device"),
             )
         else:
             self.dot_detector2 = None
@@ -76,6 +82,7 @@ class Detector:
                 roi_right=config["tile_detector"]["roi_right"],
                 roi_top=config["tile_detector"]["roi_top"],
                 roi_bottom=config["tile_detector"]["roi_bottom"],
+                device=config["tile_detector"].get("device"),
             )
         else:
             self.tile_detector = None
@@ -86,6 +93,7 @@ class Detector:
                 checkpoints_path=config["dot_cluster"]["checkpoints_path"],
                 threshold=config["dot_cluster"]["threshold"],
                 classes=config["dot_cluster"]["classes"],
+                device=config["dot_cluster"].get("device"),
                 )
             )
         else:
@@ -98,6 +106,7 @@ class Detector:
                 imgsz=config["dot_classifier"]["imgsz"],
                 conf_threshold=config["dot_classifier"]["threshold"],
                 classes=config["dot_classifier"]["classes"],
+                device=config["dot_classifier"].get("device"),
                 )
             )
         else:
@@ -110,6 +119,7 @@ class Detector:
                 imgsz=config["classifier"]["imgsz"],
                 conf_threshold=config["classifier"]["threshold"],
                 classes=config["classifier"]["classes"],
+                device=config["classifier"].get("device"),
                 )
             )
         else:
@@ -122,6 +132,7 @@ class Detector:
                 holdout_path=config["patchcore"]["holdout"],
                 score_threshold=config["patchcore"]["threshold"],
                 imgsz=config["patchcore"]["imgsz"],
+                device=config["patchcore"].get("device"),
             )
         else:
             self.patchcore = None
@@ -135,6 +146,22 @@ class Detector:
             )
         else:
             self.region_segmenter = None
+
+    @staticmethod
+    def _timed_call(fn, *args, **kwargs):
+        started = time.time()
+        result = fn(*args, **kwargs)
+        return result, time.time() - started
+
+    def _run_anomaly_pipeline(self, images, foreground):
+        started = time.time()
+        anomaly = self.anomaly_extractor.infer(images, foreground.masks)
+        anomaly_clusters = self.region_anomaly_cluster.infer(images, anomaly) if self.region_anomaly_cluster is not None else None
+        anomaly = filter_by_cluster(anomaly, anomaly_clusters) if anomaly_clusters is not None else anomaly
+        anomaly_cls = self.region_classifier.infer(images, anomaly) if self.region_classifier is not None else anomaly_clusters
+        segmentation = self.region_segmenter.infer(foreground.images, anomaly, anomaly_cls) if self.region_segmenter is not None else None
+        segmentation_cls = [ClassificationBatchItem(regions=[]) for _ in range(len(images))] if segmentation is not None else None
+        return anomaly, anomaly_cls, segmentation, segmentation_cls, time.time() - started
 
     # ---------------------------------
     # Main API
@@ -163,56 +190,43 @@ class Detector:
         foreground = self.bgremover.infer(images)
         t2 = time.time()
 
-        # detect anomaly regions
-        anomaly = self.anomaly_extractor.infer(images, foreground.masks)
-        t3 = time.time()
+        parallel_start = time.time()
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            anomaly_task = executor.submit(self._run_anomaly_pipeline, images, foreground)
+            dot1_task = executor.submit(self._timed_call, self.dot_detector1.infer, foreground.images, conf_thresholds=dot_confs) if self.dot_detector1 is not None else None
+            dot2_task = executor.submit(self._timed_call, self.dot_detector2.infer, foreground.images, conf_thresholds=dot_confs) if self.dot_detector2 is not None else None
+            tile_task = executor.submit(self._timed_call, self.tile_detector.infer, images, conf_thresholds=dot_confs, foreground_masks=foreground.masks) if self.tile_detector is not None else None
+            patchcore_task = executor.submit(self._timed_call, self.patchcore.infer, images, foreground.masks, active_by_side=patchcore_active) if self.patchcore is not None else None
 
-        # cluster anomaly regions
-        anomaly_clusters = self.region_anomaly_cluster.infer(images, anomaly) if self.region_anomaly_cluster is not None else None
-        anomaly = filter_by_cluster(anomaly, anomaly_clusters) if anomaly_clusters is not None else anomaly
-        t4 = time.time()
+            # (Optional, Independent from Anomaly) dot detection
+            dot1, dot1_time = dot1_task.result() if dot1_task is not None else (None, 0.0)
+            dot2, dot2_time = dot2_task.result() if dot2_task is not None else (None, 0.0)
 
-        # classify anomaly regions
-        anomaly_cls = self.region_classifier.infer(images, anomaly) if self.region_classifier is not None else anomaly_clusters
-        t5 = time.time()
+            merge_dot_start = time.time()
+            merged_dot = merge_anomlay_outputs([x for x in (dot1, dot2) if x is not None]) if any(x is not None for x in (dot1, dot2)) else None
+            merge_dot_time = time.time() - merge_dot_start
 
-        # segment anomaly regions
-        segmentation = self.region_segmenter.infer(foreground.images, anomaly, anomaly_cls) if self.region_segmenter is not None else None
-        t6 = time.time()
+            # TODO: 점이물 하드 코딩, 추후 개선
+            dot_cluster_start = time.time()
+            dot_clusters = self.region_dot_cluster.infer(images, merged_dot) if self.region_dot_cluster is not None else (RegionClassificationOutput([[Classification(class_id=-1, class_name="foreign", confidence=float(r.confidence), is_pass=False, color=(0, 0, 255)) for r in regions] for regions in merged_dot.batch_regions]) if merged_dot is not None else None)
+            merged_dot = filter_by_cluster(merged_dot, dot_clusters) if dot_clusters is not None else merged_dot
+            dot_cluster_time = time.time() - dot_cluster_start
 
-        # reclassify segmented regions
-        segmentation_cls = [ClassificationBatchItem(regions=[]) for _ in range(len(images))] if segmentation is not None else None
-        t7 = time.time()
+            dot_classification_start = time.time()
+            dot_cls = self.region_dot_classifier.infer(images, merged_dot) if self.region_dot_classifier is not None else dot_clusters
+            dot_classification_time = time.time() - dot_classification_start
 
-        # (Optional, Independent from Anomaly) dot detection
-        dot1 = self.dot_detector1.infer(foreground.images, conf_thresholds=dot_confs) if self.dot_detector1 is not None else None
-        t8 = time.time()
+            anomaly, anomaly_cls, segmentation, segmentation_cls, anomaly_time = anomaly_task.result()
+            dot3, tile_time = tile_task.result() if tile_task is not None else (None, 0.0)
+            patchcore, patchcore_time = patchcore_task.result() if patchcore_task is not None else (None, 0.0)
 
-        dot2 = self.dot_detector2.infer(foreground.images, conf_thresholds=dot_confs) if self.dot_detector2 is not None else None
-        t9 = time.time()
-
-        dot3 = self.tile_detector.infer(images, conf_thresholds=dot_confs, foreground_masks=foreground.masks) if self.tile_detector is not None else None
-        t10 = time.time()
-
-        merged_dot = merge_anomlay_outputs([x for x in (dot1, dot2) if x is not None]) if any(x is not None for x in (dot1, dot2)) else None
-        t11 = time.time()
-
-        # TODO: 점이물 하드 코딩, 추후 개선
-        dot_clusters = self.region_dot_cluster.infer(images, merged_dot) if self.region_dot_cluster is not None else (RegionClassificationOutput([[Classification(class_id=-1, class_name="foreign", confidence=float(r.confidence), is_pass=False, color=(0, 0, 255)) for r in regions] for regions in merged_dot.batch_regions]) if merged_dot is not None else None)
-        merged_dot = filter_by_cluster(merged_dot, dot_clusters) if dot_clusters is not None else merged_dot
-        t12 = time.time()
-
-        dot_cls = self.region_dot_classifier.infer(images, merged_dot) if self.region_dot_classifier is not None else dot_clusters
-        t13 = time.time()
-        
         tile_cls = RegionClassificationOutput([[Classification(class_id=-1, class_name="foreign", confidence=float(r.confidence), is_pass=False, color=(0, 0, 255)) for r in regions] for regions in dot3.batch_regions]) if dot3 is not None else None
-        
-        # Merge Anomaly's and Dot Detection's Classifications
+
+        merge_final_start = time.time()
         merged_anomaly = merge_anomlay_outputs([anomaly, merged_dot, dot3])
         merged_cls = merge_cls_outputs([anomaly_cls, dot_cls, tile_cls])
-        t14 = time.time()
-
-        patchcore = self.patchcore.infer(images, foreground.masks, active_by_side=patchcore_active) if self.patchcore is not None else None
+        merge_final_time = time.time() - merge_final_start
+        parallel_time = time.time() - parallel_start
         t15 = time.time()
 
         # TODO:
@@ -220,22 +234,19 @@ class Detector:
 
         print(f"load images          : {(t1  - t0 ) * 1000:.1f} ms")
         print(f"foreground           : {(t2  - t1 ) * 1000:.1f} ms")
-        print(f"anomaly              : {(t3  - t2 ) * 1000:.1f} ms")
-        print(f"anomaly_cluster      : {(t4  - t3 ) * 1000:.1f} ms")
-        print(f"classification       : {(t5  - t4 ) * 1000:.1f} ms")
-        print(f"segmentation         : {(t6  - t5 ) * 1000:.1f} ms")
-        print(f"segmentation_cls     : {(t7  - t6 ) * 1000:.1f} ms")
+        print(f"anomaly pipeline     : {anomaly_time * 1000:.1f} ms")
 
-        print(f"dot1                 : {(t8  - t7 ) * 1000:.1f} ms")
-        print(f"dot2                 : {(t9  - t8 ) * 1000:.1f} ms")
-        print(f"tile_detector        : {(t10 - t9 ) * 1000:.1f} ms")
+        print(f"dot1                 : {dot1_time * 1000:.1f} ms")
+        print(f"dot2                 : {dot2_time * 1000:.1f} ms")
+        print(f"tile_detector        : {tile_time * 1000:.1f} ms")
 
-        print(f"merge_dot            : {(t11 - t10) * 1000:.1f} ms")
-        print(f"dot_cluster          : {(t12 - t11) * 1000:.1f} ms")
-        print(f"dot_classification   : {(t13 - t12) * 1000:.1f} ms")
+        print(f"merge_dot            : {merge_dot_time * 1000:.1f} ms")
+        print(f"dot_cluster          : {dot_cluster_time * 1000:.1f} ms")
+        print(f"dot_classification   : {dot_classification_time * 1000:.1f} ms")
 
-        print(f"merge_final          : {(t14 - t13) * 1000:.1f} ms")
-        print(f"patchcore            : {(t15 - t14) * 1000:.1f} ms")
+        print(f"merge_final          : {merge_final_time * 1000:.1f} ms")
+        print(f"patchcore            : {patchcore_time * 1000:.1f} ms")
+        print(f"parallel wall        : {parallel_time * 1000:.1f} ms")
 
         print(f"image count          : {len(images)}")
         print(f"total                : {(t15 - t0) * 1000:.1f} ms")

@@ -16,6 +16,7 @@ class Segmenter:
             "checkpoint": str,                # weights path
             "imgsz": int,                     # inference image size
             "threshold": float,               # model-level default threshold
+            "device": str | None,              # e.g. "cuda:0", "cuda:1", "cpu"
             "classes": {                      # this model's class table
                 <yolo_cls_id>: {
                     "name": str,
@@ -50,6 +51,7 @@ class Segmenter:
                     "imgsz": int(cfg.get("imgsz", 640)),
                     "threshold": float(cfg.get("threshold", 0.5)),
                     "classes": cfg.get("classes") or {},
+                    "device": cfg.get("device"),
                 }
             )
 
@@ -62,7 +64,12 @@ class Segmenter:
                 desc=f"Warm up YOLO segmenter [{idx + 1}/{len(self.models)}]",
             ):
                 dummy = [np.zeros((m["imgsz"], m["imgsz"], 3), np.uint8)]
-                _ = m["model"](dummy, imgsz=m["imgsz"], verbose=False)
+                _ = m["model"](
+                    dummy,
+                    imgsz=m["imgsz"],
+                    device=m["device"],
+                    verbose=False,
+                )
 
     def infer_patches(
         self,
@@ -86,6 +93,7 @@ class Segmenter:
             results = m["model"](
                 patches,
                 imgsz=m["imgsz"],
+                device=m["device"],
                 verbose=False,
             )
 

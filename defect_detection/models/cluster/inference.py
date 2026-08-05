@@ -2,7 +2,7 @@ import os
 import glob
 import shutil
 from collections import defaultdict
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 import numpy as np
@@ -15,6 +15,7 @@ class Cluster:
         checkpoints_path: str,
         threshold: float,
         classes: Dict[str, Dict[str, Any]],
+        device: Optional[str] = None,
     ):
         (
             self.embeddings,
@@ -22,10 +23,13 @@ class Cluster:
             self.paths,
         ) = self._load_database(db_path=checkpoints_path)
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Using device: {device} for cluster")
-        self.device = device
-        self.embeddings = self.embeddings.to(self.device).half()
+        self.device = torch.device(
+            device or ("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        print(f"Using device: {self.device} for cluster")
+        self.embeddings = self.embeddings.to(self.device)
+        if self.device.type == "cuda":
+            self.embeddings = self.embeddings.half()
         self.threshold = threshold
         self.classes = classes
         self._warmup()
@@ -34,7 +38,7 @@ class Cluster:
         dummy = [np.zeros((224,224,3), dtype=np.uint8)] * 8
 
         with torch.inference_mode():
-            queries = get_embeddings_batch(dummy).to(self.device)
+            queries = get_embeddings_batch(dummy, device=self.device)
 
             if self.device.type == "cuda":
                 queries = queries.half()
@@ -69,7 +73,7 @@ class Cluster:
         outputs = []
 
         with torch.inference_mode():
-            queries = get_embeddings_batch(images)
+            queries = get_embeddings_batch(images, device=self.device)
             queries = queries.to(self.device, non_blocking=True)
 
             # FP16 맞추기 (GPU일 때)
@@ -121,8 +125,9 @@ class Cluster:
         import time
         t0 = time.time()
 
-        query = get_embedding(image)
-        query = query.to(self.device).half()
+        query = get_embedding(image, device=self.device).to(self.device)
+        if self.device.type == "cuda":
+            query = query.half()
 
         sims = torch.matmul(self.embeddings, query)
 

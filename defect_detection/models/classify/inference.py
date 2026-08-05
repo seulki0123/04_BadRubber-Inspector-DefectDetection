@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import tqdm
 from ultralytics import YOLO
@@ -13,17 +13,24 @@ class Classifier:
         classes: Dict[int, Dict[str, Any]],
         imgsz: int = 32,
         conf_threshold: float = 0.5,
+        device: Optional[str] = None,
     ) -> None:
         self.model = YOLO(checkpoint_path)
         self.imgsz = imgsz
         self.conf_threshold = conf_threshold
         self.classes = classes
+        self.device = device
         self._warmup()
 
     def _warmup(self, batch_size: int = 1) -> None:
         for _ in tqdm.tqdm(range(5), desc="Warm up YOLO classification model"):
             dummy = [np.zeros((self.imgsz, self.imgsz, 3), np.uint8)]
-            _ = self.model(dummy, imgsz=self.imgsz, verbose=False)
+            _ = self.model(
+                dummy,
+                imgsz=self.imgsz,
+                device=self.device,
+                verbose=False,
+            )
 
     def infer_patches(
         self,
@@ -36,6 +43,7 @@ class Classifier:
         results = self.model(
             patches,
             imgsz=self.imgsz,
+            device=self.device,
             verbose=False,
         )
 

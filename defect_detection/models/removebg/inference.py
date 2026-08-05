@@ -17,9 +17,11 @@ class BackgroundRemover:
         blur_kernel: int = 101,
         blur_threshold: float = 0.3,
         blur_resize_scale: float = 0.25,
+        device: Optional[str] = None,
     ) -> None:
         self.model = YOLO(checkpoint_path)
         self.imgsz = imgsz
+        self.device = device
         self.use_blur_mask = bool(use_blur_mask)
         self.blur_kernel = max(1, int(blur_kernel))
         self.blur_threshold = float(blur_threshold)
@@ -35,7 +37,12 @@ class BackgroundRemover:
                 np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
                 for _ in range(batch_size)
             ]
-            _ = self.model(dummy_images, imgsz=self.imgsz, verbose=False)
+            _ = self.model(
+                dummy_images,
+                imgsz=self.imgsz,
+                device=self.device,
+                verbose=False,
+            )
 
     def _parse_yolo_segmentation(
         self,
@@ -78,7 +85,12 @@ class BackgroundRemover:
         self,
         images: Sequence[np.ndarray],
     ) -> ForegroundMaskOutput:
-        results = self.model(images, imgsz=self.imgsz, verbose=False)
+        results = self.model(
+            images,
+            imgsz=self.imgsz,
+            device=self.device,
+            verbose=False,
+        )
         masks, polygons_n = self._parse_yolo_segmentation(results)
         if self.use_blur_mask:
             masks, polygons_n = self._make_blurred_contour_masks(masks, polygons_n)

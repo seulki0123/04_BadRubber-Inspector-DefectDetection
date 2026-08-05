@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 import cv2
 import tqdm
@@ -25,13 +25,16 @@ class SAM2Inference:
         stability_score_thresh: float = 0.5,
         points_per_side: int = 1,
         imgsz: int = 96,  # warmup dummy size
+        device: Optional[str] = None,
     ):
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(
+            device or ("cuda" if torch.cuda.is_available() else "cpu")
+        )
 
         sam2_model = build_sam2(
             f"configs/{config_name}",
             checkpoint_path,
-            device=device,
+            device=self.device,
         )
 
         self.predictor = SAM2AutomaticMaskGenerator(

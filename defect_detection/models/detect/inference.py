@@ -8,10 +8,18 @@ from defect_detection.outputs import AnomalyCLIPOutputOldVersion
 
 
 class ObjectDetector:
-    def __init__(self, checkpoint_path: str, imgsz: int, threshold: float, name: str) -> None:
+    def __init__(
+        self,
+        checkpoint_path: str,
+        imgsz: int,
+        threshold: float,
+        name: str,
+        device: Optional[str] = None,
+    ) -> None:
         self.model = YOLO(checkpoint_path)
         self.imgsz = imgsz
         self.threshold = threshold
+        self.device = device
         self._warmup()
         self.name = name
 
@@ -24,7 +32,12 @@ class ObjectDetector:
                 np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
                 for _ in range(batch_size)
             ]
-            _ = self.model(dummy_images, imgsz=self.imgsz, verbose=False)
+            _ = self.model(
+                dummy_images,
+                imgsz=self.imgsz,
+                device=self.device,
+                verbose=False,
+            )
 
     def infer(
         self,
@@ -37,7 +50,12 @@ class ObjectDetector:
                 f"len(conf_thresholds) ({len(conf_thresholds)})"
             )
 
-        results = self.model(images, imgsz=self.imgsz, verbose=False)
+        results = self.model(
+            images,
+            imgsz=self.imgsz,
+            device=self.device,
+            verbose=False,
+        )
 
         maps = self._yolo_to_maps(results, images, conf_thresholds=conf_thresholds)
 
