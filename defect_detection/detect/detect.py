@@ -172,15 +172,44 @@ class Detector:
         result = fn(*args, **kwargs)
         return result, time.time() - started
 
+    @staticmethod
+    def _region_counts(anomaly):
+        if anomaly is None:
+            return []
+        return [len(regions) for regions in anomaly.batch_regions]
+
     def _run_anomaly_pipeline(self, images, foreground):
         started = time.time()
+        timings = {}
+        debug = {}
+
+        stage_started = time.time()
         anomaly = self.anomaly_extractor.infer(images, foreground.masks)
+        timings["extractor"] = time.time() - stage_started
+        debug["regions_after_extractor"] = self._region_counts(anomaly)
+
+        stage_started = time.time()
         anomaly_clusters = self.region_anomaly_cluster.infer(images, anomaly) if self.region_anomaly_cluster is not None else None
+        timings["cluster"] = time.time() - stage_started
+        debug["cluster"] = getattr(self.region_anomaly_cluster, "last_debug", {}) if self.region_anomaly_cluster is not None else {}
+
         anomaly = filter_by_cluster(anomaly, anomaly_clusters) if anomaly_clusters is not None else anomaly
+        debug["regions_after_cluster"] = self._region_counts(anomaly)
+
+        stage_started = time.time()
         anomaly_cls = self.region_classifier.infer(images, anomaly) if self.region_classifier is not None else anomaly_clusters
+        timings["classifier"] = time.time() - stage_started
+        debug["classifier"] = getattr(self.region_classifier, "last_debug", {}) if self.region_classifier is not None else {}
+
+        stage_started = time.time()
         segmentation = self.region_segmenter.infer(foreground.images, anomaly, anomaly_cls) if self.region_segmenter is not None else None
+        timings["segmenter"] = time.time() - stage_started
+        debug["segmenter"] = getattr(self.region_segmenter, "last_debug", {}) if self.region_segmenter is not None else {}
+
         segmentation_cls = [ClassificationBatchItem(regions=[]) for _ in range(len(images))] if segmentation is not None else None
-        return anomaly, anomaly_cls, segmentation, segmentation_cls, time.time() - started
+        timings["total"] = time.time() - started
+        debug["timings"] = timings
+        return anomaly, anomaly_cls, segmentation, segmentation_cls, timings["total"], debug
 
     # ---------------------------------
     # Main API
@@ -235,7 +264,7 @@ class Detector:
             dot_cls = self.region_dot_classifier.infer(images, merged_dot) if self.region_dot_classifier is not None else dot_clusters
             dot_classification_time = time.time() - dot_classification_start
 
-            anomaly, anomaly_cls, segmentation, segmentation_cls, anomaly_time = anomaly_task.result()
+            anomaly, anomaly_cls, segmentation, segmentation_cls, anomaly_time, anomaly_debug = anomaly_task.result()
             dot3, tile_time = tile_task.result() if tile_task is not None else (None, 0.0)
             patchcore, patchcore_time = patchcore_task.result() if patchcore_task is not None else (None, 0.0)
 
@@ -254,6 +283,20 @@ class Detector:
         print(f"load images          : {(t1  - t0 ) * 1000:.1f} ms")
         print(f"foreground           : {(t2  - t1 ) * 1000:.1f} ms")
         print(f"anomaly pipeline     : {anomaly_time * 1000:.1f} ms")
+        anomaly_timings = anomaly_debug.get("timings", {})
+        print(f"  anomaly extractor  : {anomaly_timings.get('extractor', 0.0) * 1000:.1f} ms")
+        print(f"  anomaly cluster    : {anomaly_timings.get('cluster', 0.0) * 1000:.1f} ms")
+        print(f"  anomaly classifier : {anomaly_timings.get('classifier', 0.0) * 1000:.1f} ms")
+        print(f"  anomaly segmenter  : {anomaly_timings.get('segmenter', 0.0) * 1000:.1f} ms")
+        print(f"  anomaly regions    : {anomaly_debug.get('regions_after_extractor', [])}")
+        cluster_debug = anomaly_debug.get("cluster", {})
+        cls_debug = anomaly_debug.get("classifier", {})
+        seg_debug = anomaly_debug.get("segmenter", {})
+        print(f"  cluster patches    : {cluster_debug.get('patches', 0)} / regions {cluster_debug.get('regions', 0)}")
+        print(f"  cls patches        : {cls_debug.get('patches', 0)} / regions {cls_debug.get('regions', 0)}")
+        print(f"  seg patches        : {seg_debug.get('patches', 0)} / candidates {seg_debug.get('candidate_regions', 0)} / pass {seg_debug.get('pass_regions', 0)}")
+        print(f"  cls source counts  : {cls_debug.get('source_counts', {})}")
+        print(f"  seg patches/batch  : {seg_debug.get('patches_by_batch', {})}")
 
         print(f"dot1                 : {dot1_time * 1000:.1f} ms")
         print(f"dot2                 : {dot2_time * 1000:.1f} ms")

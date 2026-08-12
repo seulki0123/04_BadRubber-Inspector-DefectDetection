@@ -18,6 +18,7 @@ class RegionSegmenterAdapter:
 
     def __init__(self, segmenter: Segmenter):
         self.segmenter = segmenter
+        self.last_debug = {}
 
     def infer(
         self,
@@ -31,17 +32,21 @@ class RegionSegmenterAdapter:
             defaultdict(list)
         )
         regions_with_patch: Dict[int, Set[int]] = defaultdict(set)
+        region_count = 0
+        pass_count = 0
 
         # 1. collect patches (배치 이미지별로 묶음)
         for b_idx, (img, regions) in enumerate(
             zip(images, anomaly.batch_regions)
         ):
             H, W = img.shape[:2]
+            region_count += len(regions)
 
             for r_idx, (region, region_cls) in enumerate(
                 zip(regions, classifications[b_idx].regions)
             ):
                 if region_cls.is_pass:
+                    pass_count += 1
                     continue
 
                 x1n, y1n, x2n, y2n = scale_bbox_xyxy_n(
@@ -63,6 +68,18 @@ class RegionSegmenterAdapter:
                 regions_with_patch[b_idx].add(r_idx)
 
         # 2. segmentation inference — 이미지(배치 인덱스) 단위로 병합·좌표계 유지
+        patch_count = sum(len(patches) for patches in patches_by_batch.values())
+        self.last_debug = {
+            "regions": region_count,
+            "pass_regions": pass_count,
+            "candidate_regions": region_count - pass_count,
+            "patches": patch_count,
+            "patches_by_batch": {
+                b_idx: len(patches)
+                for b_idx, patches in patches_by_batch.items()
+            },
+        }
+
         merged_by_batch: Dict[int, List[Segmentation]] = {}
         for b_idx, p_list in patches_by_batch.items():
             H, W = images[b_idx].shape[:2]

@@ -61,6 +61,7 @@ class TiledAnomalyExtractor:
             score_threshold=self.score_threshold,
             area_threshold=self.area_threshold,
             source=self.name,
+            extract_regions=False,
         )
 
         batch_regions = [
