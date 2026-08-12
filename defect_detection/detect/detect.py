@@ -126,6 +126,7 @@ class Detector:
                 conf_threshold=config["dot_classifier"]["threshold"],
                 classes=config["dot_classifier"]["classes"],
                 device=config["dot_classifier"].get("device"),
+                predict_batch_size=config["dot_classifier"].get("predict_batch_size", 32),
                 )
             )
         else:
@@ -139,6 +140,7 @@ class Detector:
                 conf_threshold=config["classifier"]["threshold"],
                 classes=config["classifier"]["classes"],
                 device=config["classifier"].get("device"),
+                predict_batch_size=config["classifier"].get("predict_batch_size", 32),
                 )
             )
         else:
@@ -297,6 +299,8 @@ class Detector:
         print(f"  seg patches        : {seg_debug.get('patches', 0)} / candidates {seg_debug.get('candidate_regions', 0)} / pass {seg_debug.get('pass_regions', 0)}")
         print(f"  cls source counts  : {cls_debug.get('source_counts', {})}")
         print(f"  seg patches/batch  : {seg_debug.get('patches_by_batch', {})}")
+        print(f"  cls model debug    : {cls_debug.get('model', {})}")
+        print(f"  seg model debug    : {seg_debug.get('model', {})}")
 
         print(f"dot1                 : {dot1_time * 1000:.1f} ms")
         print(f"dot2                 : {dot2_time * 1000:.1f} ms")
