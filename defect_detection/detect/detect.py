@@ -5,7 +5,7 @@ from typing import List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
-from defect_detection.models import AnomalyCLIPInference, BackgroundRemover, Classifier, RegionClassifierAdapter, Segmenter, RegionSegmenterAdapter, ObjectDetector, TiledObjectDetector, Cluster, PatchcoreDetector
+from defect_detection.models import AnomalyCLIPInference, BackgroundRemover, Classifier, RegionClassifierAdapter, Segmenter, RegionSegmenterAdapter, ObjectDetector, TiledObjectDetector, TiledAnomalyExtractor, Cluster, PatchcoreDetector
 from defect_detection.outputs import RegionClassificationOutput, ClassificationBatchItem, Classification, merge_anomlay_outputs, filter_by_cluster, merge_cls_outputs
 from defect_detection.utils import load_config, random_color
 from .result import DetectorOutput
@@ -18,13 +18,32 @@ class Detector:
         self.config = config
         self.show = config.get("show") or {}
 
-        self.anomaly_extractor = AnomalyCLIPInference(
-            checkpoint_path=config["anomalyclip"]["checkpoint"],
-            imgsz=config["anomalyclip"]["imgsz"],
-            score_threshold=config["anomalyclip"]["threshold"],
-            area_threshold=config["anomalyclip"]["min_area"],
-            device=config["anomalyclip"].get("device"),
-        )
+        anomaly_extractor_cfg = config.get("anomaly_extractor") or {}
+        anomalyclip_cfg = config.get("anomalyclip") or {}
+        if anomaly_extractor_cfg.get("use_tiles", False):
+            self.anomaly_extractor = TiledAnomalyExtractor(
+                grids=anomaly_extractor_cfg.get("grids", (3, 4)),
+                overlap=anomaly_extractor_cfg.get("overlap", 0.25),
+                pad_ratio=anomaly_extractor_cfg.get("pad_ratio", 0.05),
+                score=anomaly_extractor_cfg.get("score", 1.0),
+                score_threshold=anomaly_extractor_cfg.get(
+                    "score_threshold",
+                    anomalyclip_cfg.get("threshold", 0.0),
+                ),
+                area_threshold=anomaly_extractor_cfg.get(
+                    "area_threshold",
+                    anomalyclip_cfg.get("min_area", 0),
+                ),
+                name=anomaly_extractor_cfg.get("name", "tiles"),
+            )
+        else:
+            self.anomaly_extractor = AnomalyCLIPInference(
+                checkpoint_path=anomalyclip_cfg["checkpoint"],
+                imgsz=anomalyclip_cfg["imgsz"],
+                score_threshold=anomalyclip_cfg["threshold"],
+                area_threshold=anomalyclip_cfg["min_area"],
+                device=anomalyclip_cfg.get("device"),
+            )
 
         self.bgremover = BackgroundRemover(
             checkpoint_path=config["bgremover"]["checkpoint"],
