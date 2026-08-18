@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 
 from defect_detection.models import AnomalyCLIPInference, BackgroundRemover, Classifier, RegionClassifierAdapter, Segmenter, RegionSegmenterAdapter, ObjectDetector, TiledObjectDetector, Cluster, PatchcoreDetector
-from defect_detection.outputs import RegionClassificationOutput, ClassificationBatchItem, Classification, merge_anomlay_outputs, filter_by_cluster, merge_cls_outputs
+from defect_detection.outputs import RegionClassificationOutput, ClassificationBatchItem, Classification, merge_anomlay_outputs, merge_overlapping_same_class_regions, filter_by_cluster, merge_cls_outputs
 from defect_detection.utils import load_config, random_color
 from .result import DetectorOutput
 from .visualize import draw_normalized_polygons
@@ -225,6 +225,7 @@ class Detector:
         merge_final_start = time.time()
         merged_anomaly = merge_anomlay_outputs([anomaly, merged_dot, dot3])
         merged_cls = merge_cls_outputs([anomaly_cls, dot_cls, tile_cls])
+        merged_anomaly, merged_cls = merge_overlapping_same_class_regions(merged_anomaly, merged_cls)
         merge_final_time = time.time() - merge_final_start
         parallel_time = time.time() - parallel_start
         t15 = time.time()

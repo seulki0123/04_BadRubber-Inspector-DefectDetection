@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
+from ..classify.output import Classification, RegionClassificationOutput
 from .colors import HeatmapColorRanges
 
 @dataclass
@@ -290,6 +291,145 @@ def merge_anomlay_outputs(outputs: List[AnomalyCLIPOutput]) -> AnomalyCLIPOutput
     object.__setattr__(merged, "batch_regions", new_regions)
 
     return merged
+
+def _bboxes_overlap(a, b) -> bool:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    return max(ax1, bx1) < min(ax2, bx2) and max(ay1, by1) < min(ay2, by2)
+
+def _classification_key(cls: Classification):
+    return cls.class_name
+
+def _make_union_region(regions: List[AnomalyRegion], classes: List[Classification], h: int, w: int) -> Tuple[AnomalyRegion, Classification]:
+    x1 = min(int(r.bboxes_xyxy[0]) for r in regions)
+    y1 = min(int(r.bboxes_xyxy[1]) for r in regions)
+    x2 = max(int(r.bboxes_xyxy[2]) for r in regions)
+    y2 = max(int(r.bboxes_xyxy[3]) for r in regions)
+
+    x1 = max(0, min(w, x1))
+    y1 = max(0, min(h, y1))
+    x2 = max(0, min(w, x2))
+    y2 = max(0, min(h, y2))
+
+    polygon = np.array(
+        [[x1, y1], [x2, y1], [x2, y2], [x1, y2]],
+        dtype=np.int32,
+    )
+    polygon_n = polygon.astype(np.float32)
+    if w > 0:
+        polygon_n[:, 0] = np.clip(polygon_n[:, 0] / w, 0.0, 1.0)
+    if h > 0:
+        polygon_n[:, 1] = np.clip(polygon_n[:, 1] / h, 0.0, 1.0)
+
+    best_region = max(regions, key=lambda r: float(r.confidence))
+    best_cls = max(classes, key=lambda c: float(c.confidence))
+    confidence = max(float(r.confidence) for r in regions)
+    area = float(max(0, x2 - x1) * max(0, y2 - y1))
+    source = "+".join(dict.fromkeys(str(r.source) for r in regions))
+
+    region = AnomalyRegion(
+        polygon=polygon,
+        polygon_n=polygon_n,
+        bboxes_xyxy=(x1, y1, x2, y2),
+        bboxes_xyxy_n=(
+            max(0.0, min(1.0, x1 / w)) if w > 0 else 0.0,
+            max(0.0, min(1.0, y1 / h)) if h > 0 else 0.0,
+            max(0.0, min(1.0, x2 / w)) if w > 0 else 0.0,
+            max(0.0, min(1.0, y2 / h)) if h > 0 else 0.0,
+        ),
+        confidence=confidence,
+        area=area,
+        area_n=area / float(h * w) if h > 0 and w > 0 else 0.0,
+        source=source,
+        is_pass=all(c.is_pass for c in classes),
+    )
+    region.class_id = best_cls.class_id
+    region.class_name = best_cls.class_name
+    region.color = best_cls.color
+
+    cls = Classification(
+        class_id=best_cls.class_id,
+        class_name=best_cls.class_name,
+        confidence=max(float(c.confidence) for c in classes),
+        is_pass=all(c.is_pass for c in classes),
+        color=best_cls.color,
+    )
+    return region, cls
+
+def merge_overlapping_same_class_regions(
+    anomaly: AnomalyCLIPOutput,
+    cls_output: RegionClassificationOutput,
+) -> Tuple[AnomalyCLIPOutput, RegionClassificationOutput]:
+    """Merge overlapping regions only when their classifications match."""
+    if anomaly is None or cls_output is None:
+        return anomaly, cls_output
+
+    batch_size = len(anomaly.batch_regions)
+    if len(cls_output.batch) != batch_size:
+        raise ValueError("Batch size mismatch in same-class overlap merge")
+
+    merged_regions_batch = []
+    merged_cls_batch = []
+
+    for b_idx, (regions, classes) in enumerate(zip(anomaly.batch_regions, cls_output.batch)):
+        if len(regions) != len(classes):
+            raise ValueError("Region/classification count mismatch in same-class overlap merge")
+
+        count = len(regions)
+        if count == 0:
+            merged_regions_batch.append([])
+            merged_cls_batch.append([])
+            continue
+
+        h, w = anomaly.maps[b_idx].shape[:2]
+        parents = list(range(count))
+
+        def find(idx):
+            while parents[idx] != idx:
+                parents[idx] = parents[parents[idx]]
+                idx = parents[idx]
+            return idx
+
+        def union(a, b):
+            root_a = find(a)
+            root_b = find(b)
+            if root_a != root_b:
+                parents[root_b] = root_a
+
+        for i in range(count):
+            for j in range(i + 1, count):
+                if _classification_key(classes[i]) != _classification_key(classes[j]):
+                    continue
+                if _bboxes_overlap(regions[i].bboxes_xyxy, regions[j].bboxes_xyxy):
+                    union(i, j)
+
+        groups = {}
+        for idx in range(count):
+            groups.setdefault(find(idx), []).append(idx)
+
+        batch_regions = []
+        batch_classes = []
+        for indices in groups.values():
+            if len(indices) == 1:
+                idx = indices[0]
+                batch_regions.append(regions[idx])
+                batch_classes.append(classes[idx])
+                continue
+
+            merged_region, merged_cls = _make_union_region(
+                [regions[idx] for idx in indices],
+                [classes[idx] for idx in indices],
+                h,
+                w,
+            )
+            batch_regions.append(merged_region)
+            batch_classes.append(merged_cls)
+
+        merged_regions_batch.append(batch_regions)
+        merged_cls_batch.append(batch_classes)
+
+    object.__setattr__(anomaly, "batch_regions", merged_regions_batch)
+    return anomaly, RegionClassificationOutput(merged_cls_batch)
 
 def filter_by_cluster(anomaly, cluster_output):
     new_regions = []
