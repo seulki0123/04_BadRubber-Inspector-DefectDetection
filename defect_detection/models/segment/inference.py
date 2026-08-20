@@ -1,4 +1,4 @@
-from typing import Any, List, Sequence, Tuple, Dict
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import tqdm
@@ -16,6 +16,7 @@ class Segmenter:
             "checkpoint": str,                # weights path
             "imgsz": int,                     # inference image size
             "threshold": float,               # model-level default threshold
+            "target": "crop" | "full",        # optional; default "crop"
             "device": str | None,              # e.g. "cuda:0", "cuda:1", "cpu"
             "classes": {                      # this model's class table
                 <yolo_cls_id>: {
@@ -45,15 +46,22 @@ class Segmenter:
                 raise ValueError(
                     f"Segmenter model config missing 'checkpoint': {cfg!r}"
                 )
+            target = str(cfg.get("target", "crop")).lower()
+            if target not in {"crop", "full"}:
+                raise ValueError(
+                    f"Segmenter model target must be 'crop' or 'full', got {target!r}"
+                )
             self.models.append(
                 {
                     "model": YOLO(cfg["checkpoint"]),
                     "imgsz": int(cfg.get("imgsz", 640)),
                     "threshold": float(cfg.get("threshold", 0.5)),
+                    "target": target,
                     "classes": cfg.get("classes") or {},
                     "device": cfg.get("device"),
                 }
             )
+        self.has_full_target = any(m["target"] == "full" for m in self.models)
 
         self._warmup()
 
@@ -77,8 +85,9 @@ class Segmenter:
         offsets: Sequence[Tuple[int, int, int, int]],  # x1, y1, W, H
         full_w: int,
         full_h: int,
+        full_image: Optional[np.ndarray] = None,
     ) -> List[Segmentation]:
-        if len(patches) == 0:
+        if len(patches) == 0 and not self.has_full_target:
             return []
 
         # Polygons unified by class name across all models.
@@ -89,15 +98,25 @@ class Segmenter:
         for m in self.models:
             classes_cfg: Dict[int, Dict[str, Any]] = m["classes"]
             threshold: float = m["threshold"]
+            if m["target"] == "full":
+                if full_image is None:
+                    continue
+                inputs = [full_image]
+                input_offsets = [(0, 0, full_w, full_h)]
+            else:
+                if len(patches) == 0:
+                    continue
+                inputs = patches
+                input_offsets = offsets
 
             results = m["model"](
-                patches,
+                inputs,
                 imgsz=m["imgsz"],
                 device=m["device"],
                 verbose=False,
             )
 
-            for r, (x1, y1, W, H) in zip(results, offsets):
+            for r, (x1, y1, W, H) in zip(results, input_offsets):
 
                 if r.masks is None:
                     continue
