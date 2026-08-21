@@ -1,3 +1,4 @@
+import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
@@ -41,6 +42,7 @@ class Segmenter:
             raise ValueError("Segmenter requires at least one model config.")
 
         self.models: List[Dict[str, Any]] = []
+        self.last_debug = {}
         for cfg in models:
             if "checkpoint" not in cfg:
                 raise ValueError(
@@ -59,6 +61,7 @@ class Segmenter:
                     "target": target,
                     "classes": cfg.get("classes") or {},
                     "device": cfg.get("device"),
+                    "predict_batch_size": max(1, int(cfg.get("predict_batch_size", 32))),
                 }
             )
         self.has_full_target = any(m["target"] == "full" for m in self.models)
@@ -90,82 +93,139 @@ class Segmenter:
         if len(patches) == 0 and not self.has_full_target:
             return []
 
-        # Polygons unified by class name across all models.
-        class_polys: Dict[str, List[Tuple[np.ndarray, float, float]]] = {}
-        # name -> {"class_id", "name", "color"}, assigned in first-seen order.
-        unified_classes: Dict[str, Dict[str, Any]] = {}
+        per_image = self.infer_patches_by_image(
+            patches,
+            [(0, x1, y1, W, H) for x1, y1, W, H in offsets],
+            {0: (full_w, full_h)},
+            full_images={0: full_image} if full_image is not None else None,
+        )
+        return per_image.get(0, [])
+
+    def infer_patches_by_image(
+        self,
+        patches: Sequence[np.ndarray],
+        offsets: Sequence[Tuple[int, int, int, int, int]],  # b_idx, x1, y1, W, H
+        image_shapes: Dict[int, Tuple[int, int]],  # b_idx -> (W, H)
+        full_images: Optional[Dict[int, np.ndarray]] = None,
+    ) -> Dict[int, List[Segmentation]]:
+        full_images = full_images or {}
+        if len(patches) == 0 and not (self.has_full_target and full_images):
+            self.last_debug = {
+                "patches": 0,
+                "model_chunks": [],
+                "wall_ms": 0.0,
+                "speed_ms": {},
+            }
+            return {}
+
+        class_polys_by_batch: Dict[int, Dict[str, List[Tuple[np.ndarray, float, float]]]] = {}
+        unified_classes_by_batch: Dict[int, Dict[str, Dict[str, Any]]] = {}
+        started = time.perf_counter()
+        model_chunks = []
+        speed_totals: Dict[str, float] = {}
 
         for m in self.models:
             classes_cfg: Dict[int, Dict[str, Any]] = m["classes"]
             threshold: float = m["threshold"]
+            batch_size = m["predict_batch_size"]
             if m["target"] == "full":
-                if full_image is None:
-                    continue
-                inputs = [full_image]
-                input_offsets = [(0, 0, full_w, full_h)]
+                model_inputs = [
+                    (b_idx, image)
+                    for b_idx, image in full_images.items()
+                    if b_idx in image_shapes
+                ]
             else:
-                if len(patches) == 0:
-                    continue
-                inputs = patches
-                input_offsets = offsets
+                model_inputs = list(zip(offsets, patches))
 
-            results = m["model"](
-                inputs,
-                imgsz=m["imgsz"],
-                device=m["device"],
-                verbose=False,
+            for start in range(0, len(model_inputs), batch_size):
+                chunk_items = model_inputs[start : start + batch_size]
+                if m["target"] == "full":
+                    chunk = [image for _, image in chunk_items]
+                    meta_chunk = [
+                        (b_idx, 0, 0, image_shapes[b_idx][0], image_shapes[b_idx][1])
+                        for b_idx, _ in chunk_items
+                    ]
+                else:
+                    meta_chunk = [meta for meta, _ in chunk_items]
+                    chunk = [patch for _, patch in chunk_items]
+
+                if not chunk:
+                    continue
+
+                model_chunks.append(len(chunk))
+                results = m["model"](
+                    chunk,
+                    imgsz=m["imgsz"],
+                    device=m["device"],
+                    verbose=False,
+                )
+                for result in results:
+                    for key, value in getattr(result, "speed", {}).items():
+                        speed_totals[key] = speed_totals.get(key, 0.0) + float(value)
+
+                for r, (b_idx, x1, y1, W, H) in zip(results, meta_chunk):
+
+                    if r.masks is None:
+                        continue
+
+                    class_polys = class_polys_by_batch.setdefault(b_idx, {})
+                    unified_classes = unified_classes_by_batch.setdefault(b_idx, {})
+
+                    for mask, cls_id, conf in zip(
+                        r.masks.xy,
+                        r.boxes.cls,
+                        r.boxes.conf,
+                    ):
+                        conf = float(conf)
+
+                        cls_id = int(cls_id)
+
+                        cls_info = classes_cfg.get(cls_id)
+                        if cls_info is None or cls_info.get("pass", False):
+                            # this model opted out of this class
+                            continue
+
+                        class_threshold = float(cls_info.get("conf", threshold))
+                        if conf < class_threshold:
+                            continue
+
+                        name = cls_info["name"]
+                        if name not in unified_classes:
+                            unified_classes[name] = {
+                                "class_id": len(unified_classes),
+                                "name": name,
+                                "color": cls_info.get("color") or (0, 0, 255),
+                            }
+
+                        polygon_patch = np.array(mask)
+
+                        polygon_global = polygon_patch.copy()
+                        polygon_global[:, 0] += x1
+                        polygon_global[:, 1] += y1
+                        polygon_global = polygon_global.astype(np.float32)
+
+                        area = cv2.contourArea(polygon_global)
+
+                        class_polys.setdefault(name, []).append(
+                            (polygon_global, conf, area)
+                        )
+
+        self.last_debug = {
+            "patches": len(patches),
+            "model_chunks": model_chunks,
+            "wall_ms": (time.perf_counter() - started) * 1000.0,
+            "speed_ms": speed_totals,
+        }
+
+        return {
+            b_idx: self._merge_polygons_by_class(
+                class_polys_by_batch.get(b_idx, {}),
+                unified_classes_by_batch.get(b_idx, {}),
+                W,
+                H,
             )
-
-            for r, (x1, y1, W, H) in zip(results, input_offsets):
-
-                if r.masks is None:
-                    continue
-
-                for mask, cls_id, conf in zip(
-                    r.masks.xy,
-                    r.boxes.cls,
-                    r.boxes.conf,
-                ):
-                    conf = float(conf)
-
-                    cls_id = int(cls_id)
-
-                    cls_info = classes_cfg.get(cls_id)
-                    if cls_info is None or cls_info.get("pass", False):
-                        # this model opted out of this class
-                        continue
-
-                    class_threshold = float(cls_info.get("conf", threshold))
-                    if conf < class_threshold:
-                        continue
-
-                    name = cls_info["name"]
-                    if name not in unified_classes:
-                        unified_classes[name] = {
-                            "class_id": len(unified_classes),
-                            "name": name,
-                            "color": cls_info.get("color") or (0, 0, 255),
-                        }
-
-                    polygon_patch = np.array(mask)
-
-                    polygon_global = polygon_patch.copy()
-                    polygon_global[:, 0] += x1
-                    polygon_global[:, 1] += y1
-                    polygon_global = polygon_global.astype(np.float32)
-
-                    area = cv2.contourArea(polygon_global)
-
-                    class_polys.setdefault(name, []).append(
-                        (polygon_global, conf, area)
-                    )
-
-        return self._merge_polygons_by_class(
-            class_polys,
-            unified_classes,
-            full_w,
-            full_h,
-        )
+            for b_idx, (W, H) in image_shapes.items()
+        }
 
     def _merge_polygons_by_class(
         self,

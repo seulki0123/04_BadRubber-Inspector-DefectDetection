@@ -1,3 +1,4 @@
+from collections import Counter
 from typing import List, Tuple
 import numpy as np
 
@@ -14,6 +15,7 @@ class RegionClassifierAdapter:
 
     def __init__(self, classifier: Classifier):
         self.classifier = classifier
+        self.last_debug = {}
 
     def infer(
         self,
@@ -23,12 +25,21 @@ class RegionClassifierAdapter:
 
         patches = []
         mapping: List[Tuple[int, int]] = []
+        source_counts = Counter()
+        region_count = 0
 
         for b_idx, (img, regions) in enumerate(zip(images, anomaly.batch_regions)):
             H, W = img.shape[:2]
+            region_count += len(regions)
 
             for r_idx, region in enumerate(regions):
-                scale = 10.0 if "dot" in region.source else 2.0
+                source_counts[region.source] += 1
+                if "tiles" in region.source:
+                    scale = 1.0
+                elif "dot" in region.source:
+                    scale = 10.0
+                else:
+                    scale = 2.0
                 x1n, y1n, x2n, y2n = scale_bbox_xyxy_n(region.bboxes_xyxy_n, scale=scale)
 
                 x1, y1 = int(x1n * W), int(y1n * H)
@@ -44,7 +55,14 @@ class RegionClassifierAdapter:
                 patches.append(patch)
                 mapping.append((b_idx, r_idx, region.is_pass))
 
+        self.last_debug = {
+            "regions": region_count,
+            "patches": len(patches),
+            "source_counts": dict(source_counts),
+        }
+
         results = self.classifier.infer_patches(patches)
+        self.last_debug["model"] = getattr(self.classifier, "last_debug", {})
 
         batch_out = [
             [None] * len(regions)

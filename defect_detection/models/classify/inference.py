@@ -1,3 +1,4 @@
+import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import tqdm
@@ -14,12 +15,15 @@ class Classifier:
         imgsz: int = 32,
         conf_threshold: float = 0.5,
         device: Optional[str] = None,
+        predict_batch_size: int = 32,
     ) -> None:
         self.model = YOLO(checkpoint_path)
         self.imgsz = imgsz
         self.conf_threshold = conf_threshold
         self.classes = classes
         self.device = device
+        self.predict_batch_size = max(1, int(predict_batch_size))
+        self.last_debug = {}
         self._warmup()
 
     def _warmup(self, batch_size: int = 1) -> None:
@@ -38,14 +42,42 @@ class Classifier:
     ) -> List[Classification]:
 
         if len(patches) == 0:
+            self.last_debug = {
+                "patches": 0,
+                "chunks": 0,
+                "batch_size": self.predict_batch_size,
+                "wall_ms": 0.0,
+                "speed_ms": {},
+            }
             return []
 
-        results = self.model(
-            patches,
-            imgsz=self.imgsz,
-            device=self.device,
-            verbose=False,
-        )
+        started = time.perf_counter()
+        results = []
+        speed_totals: Dict[str, float] = {}
+        chunk_sizes = []
+
+        for start in range(0, len(patches), self.predict_batch_size):
+            chunk = patches[start : start + self.predict_batch_size]
+            chunk_sizes.append(len(chunk))
+            chunk_results = self.model(
+                chunk,
+                imgsz=self.imgsz,
+                device=self.device,
+                verbose=False,
+            )
+            results.extend(chunk_results)
+            for result in chunk_results:
+                for key, value in getattr(result, "speed", {}).items():
+                    speed_totals[key] = speed_totals.get(key, 0.0) + float(value)
+
+        self.last_debug = {
+            "patches": len(patches),
+            "chunks": len(chunk_sizes),
+            "chunk_sizes": chunk_sizes,
+            "batch_size": self.predict_batch_size,
+            "wall_ms": (time.perf_counter() - started) * 1000.0,
+            "speed_ms": speed_totals,
+        }
 
         outputs: List[Classification] = []
 

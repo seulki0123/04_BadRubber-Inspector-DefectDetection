@@ -1,5 +1,5 @@
 from typing import List, Tuple
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 import cv2
 import numpy as np
 
@@ -62,17 +62,22 @@ class AnomalyCLIPOutput:
     score_threshold: float
     area_threshold: float
     source: str
+    extract_regions: InitVar[bool] = True
 
-    def __post_init__(self):
-        self._validate_inputs()
+    def __post_init__(self, extract_regions):
+        self._validate_inputs(extract_regions)
 
-        batch_regions, global_scores = self._extract_regions_batch()
+        if extract_regions:
+            batch_regions, global_scores = self._extract_regions_batch()
+        else:
+            batch_regions = [[] for _ in range(self.maps.shape[0])]
+            global_scores = [0.0 for _ in range(self.maps.shape[0])]
 
         # create slots-only attributes here
         object.__setattr__(self, "batch_regions", batch_regions)
         object.__setattr__(self, "global_scores", global_scores)
 
-    def _validate_inputs(self):
+    def _validate_inputs(self, extract_regions: bool):
 
         if not isinstance(self.maps, np.ndarray):
             raise TypeError("maps must be np.ndarray")
@@ -85,6 +90,9 @@ class AnomalyCLIPOutput:
 
         if not isinstance(self.area_threshold, (float, int)):
             raise TypeError("area_threshold must be float")
+
+        if not isinstance(extract_regions, bool):
+            raise TypeError("extract_regions must be bool")
 
     def _extract_regions_batch(
         self,

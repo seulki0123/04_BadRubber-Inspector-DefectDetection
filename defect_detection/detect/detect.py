@@ -5,7 +5,7 @@ from typing import List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
-from defect_detection.models import AnomalyCLIPInference, BackgroundRemover, Classifier, RegionClassifierAdapter, Segmenter, RegionSegmenterAdapter, ObjectDetector, TiledObjectDetector, Cluster, PatchcoreDetector
+from defect_detection.models import AnomalyCLIPInference, BackgroundRemover, Classifier, RegionClassifierAdapter, Segmenter, RegionSegmenterAdapter, ObjectDetector, TiledObjectDetector, TiledAnomalyExtractor, Cluster, PatchcoreDetector
 from defect_detection.outputs import RegionClassificationOutput, ClassificationBatchItem, Classification, merge_anomlay_outputs, merge_overlapping_same_class_regions, filter_by_cluster, merge_cls_outputs
 from defect_detection.utils import load_config, random_color
 from .result import DetectorOutput
@@ -18,13 +18,32 @@ class Detector:
         self.config = config
         self.show = config.get("show") or {}
 
-        self.anomaly_extractor = AnomalyCLIPInference(
-            checkpoint_path=config["anomalyclip"]["checkpoint"],
-            imgsz=config["anomalyclip"]["imgsz"],
-            score_threshold=config["anomalyclip"]["threshold"],
-            area_threshold=config["anomalyclip"]["min_area"],
-            device=config["anomalyclip"].get("device"),
-        )
+        anomaly_extractor_cfg = config.get("anomaly_extractor") or {}
+        anomalyclip_cfg = config.get("anomalyclip") or {}
+        if anomaly_extractor_cfg.get("use_tiles", False):
+            self.anomaly_extractor = TiledAnomalyExtractor(
+                grids=anomaly_extractor_cfg.get("grids", (3, 4)),
+                overlap=anomaly_extractor_cfg.get("overlap", 0.25),
+                pad_ratio=anomaly_extractor_cfg.get("pad_ratio", 0.05),
+                score=anomaly_extractor_cfg.get("score", 1.0),
+                score_threshold=anomaly_extractor_cfg.get(
+                    "score_threshold",
+                    anomalyclip_cfg.get("threshold", 0.0),
+                ),
+                area_threshold=anomaly_extractor_cfg.get(
+                    "area_threshold",
+                    anomalyclip_cfg.get("min_area", 0),
+                ),
+                name=anomaly_extractor_cfg.get("name", "tiles"),
+            )
+        else:
+            self.anomaly_extractor = AnomalyCLIPInference(
+                checkpoint_path=anomalyclip_cfg["checkpoint"],
+                imgsz=anomalyclip_cfg["imgsz"],
+                score_threshold=anomalyclip_cfg["threshold"],
+                area_threshold=anomalyclip_cfg["min_area"],
+                device=anomalyclip_cfg.get("device"),
+            )
 
         self.bgremover = BackgroundRemover(
             checkpoint_path=config["bgremover"]["checkpoint"],
@@ -107,6 +126,7 @@ class Detector:
                 conf_threshold=config["dot_classifier"]["threshold"],
                 classes=config["dot_classifier"]["classes"],
                 device=config["dot_classifier"].get("device"),
+                predict_batch_size=config["dot_classifier"].get("predict_batch_size", 32),
                 )
             )
         else:
@@ -120,6 +140,7 @@ class Detector:
                 conf_threshold=config["classifier"]["threshold"],
                 classes=config["classifier"]["classes"],
                 device=config["classifier"].get("device"),
+                predict_batch_size=config["classifier"].get("predict_batch_size", 32),
                 )
             )
         else:
@@ -153,15 +174,44 @@ class Detector:
         result = fn(*args, **kwargs)
         return result, time.time() - started
 
+    @staticmethod
+    def _region_counts(anomaly):
+        if anomaly is None:
+            return []
+        return [len(regions) for regions in anomaly.batch_regions]
+
     def _run_anomaly_pipeline(self, images, foreground):
         started = time.time()
+        timings = {}
+        debug = {}
+
+        stage_started = time.time()
         anomaly = self.anomaly_extractor.infer(images, foreground.masks)
+        timings["extractor"] = time.time() - stage_started
+        debug["regions_after_extractor"] = self._region_counts(anomaly)
+
+        stage_started = time.time()
         anomaly_clusters = self.region_anomaly_cluster.infer(images, anomaly) if self.region_anomaly_cluster is not None else None
+        timings["cluster"] = time.time() - stage_started
+        debug["cluster"] = getattr(self.region_anomaly_cluster, "last_debug", {}) if self.region_anomaly_cluster is not None else {}
+
         anomaly = filter_by_cluster(anomaly, anomaly_clusters) if anomaly_clusters is not None else anomaly
+        debug["regions_after_cluster"] = self._region_counts(anomaly)
+
+        stage_started = time.time()
         anomaly_cls = self.region_classifier.infer(images, anomaly) if self.region_classifier is not None else anomaly_clusters
+        timings["classifier"] = time.time() - stage_started
+        debug["classifier"] = getattr(self.region_classifier, "last_debug", {}) if self.region_classifier is not None else {}
+
+        stage_started = time.time()
         segmentation = self.region_segmenter.infer(foreground.images, anomaly, anomaly_cls) if self.region_segmenter is not None else None
+        timings["segmenter"] = time.time() - stage_started
+        debug["segmenter"] = getattr(self.region_segmenter, "last_debug", {}) if self.region_segmenter is not None else {}
+
         segmentation_cls = [ClassificationBatchItem(regions=[]) for _ in range(len(images))] if segmentation is not None else None
-        return anomaly, anomaly_cls, segmentation, segmentation_cls, time.time() - started
+        timings["total"] = time.time() - started
+        debug["timings"] = timings
+        return anomaly, anomaly_cls, segmentation, segmentation_cls, timings["total"], debug
 
     # ---------------------------------
     # Main API
@@ -216,7 +266,7 @@ class Detector:
             dot_cls = self.region_dot_classifier.infer(images, merged_dot) if self.region_dot_classifier is not None else dot_clusters
             dot_classification_time = time.time() - dot_classification_start
 
-            anomaly, anomaly_cls, segmentation, segmentation_cls, anomaly_time = anomaly_task.result()
+            anomaly, anomaly_cls, segmentation, segmentation_cls, anomaly_time, anomaly_debug = anomaly_task.result()
             dot3, tile_time = tile_task.result() if tile_task is not None else (None, 0.0)
             patchcore, patchcore_time = patchcore_task.result() if patchcore_task is not None else (None, 0.0)
 
@@ -236,6 +286,22 @@ class Detector:
         print(f"load images          : {(t1  - t0 ) * 1000:.1f} ms")
         print(f"foreground           : {(t2  - t1 ) * 1000:.1f} ms")
         print(f"anomaly pipeline     : {anomaly_time * 1000:.1f} ms")
+        anomaly_timings = anomaly_debug.get("timings", {})
+        print(f"  anomaly extractor  : {anomaly_timings.get('extractor', 0.0) * 1000:.1f} ms")
+        print(f"  anomaly cluster    : {anomaly_timings.get('cluster', 0.0) * 1000:.1f} ms")
+        print(f"  anomaly classifier : {anomaly_timings.get('classifier', 0.0) * 1000:.1f} ms")
+        print(f"  anomaly segmenter  : {anomaly_timings.get('segmenter', 0.0) * 1000:.1f} ms")
+        print(f"  anomaly regions    : {anomaly_debug.get('regions_after_extractor', [])}")
+        cluster_debug = anomaly_debug.get("cluster", {})
+        cls_debug = anomaly_debug.get("classifier", {})
+        seg_debug = anomaly_debug.get("segmenter", {})
+        print(f"  cluster patches    : {cluster_debug.get('patches', 0)} / regions {cluster_debug.get('regions', 0)}")
+        print(f"  cls patches        : {cls_debug.get('patches', 0)} / regions {cls_debug.get('regions', 0)}")
+        print(f"  seg patches        : {seg_debug.get('patches', 0)} / candidates {seg_debug.get('candidate_regions', 0)} / pass {seg_debug.get('pass_regions', 0)}")
+        print(f"  cls source counts  : {cls_debug.get('source_counts', {})}")
+        print(f"  seg patches/batch  : {seg_debug.get('patches_by_batch', {})}")
+        print(f"  cls model debug    : {cls_debug.get('model', {})}")
+        print(f"  seg model debug    : {seg_debug.get('model', {})}")
 
         print(f"dot1                 : {dot1_time * 1000:.1f} ms")
         print(f"dot2                 : {dot2_time * 1000:.1f} ms")
