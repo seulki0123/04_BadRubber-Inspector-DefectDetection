@@ -29,10 +29,11 @@ class Detector:
         self.bgremover = BackgroundRemover(
             checkpoint_path=config["bgremover"]["checkpoint"],
             imgsz=config["bgremover"]["imgsz"],
-            use_blur_mask=config["bgremover"]["use_blur_mask"],
-            blur_kernel=config["bgremover"]["blur_kernel"],
-            blur_threshold=config["bgremover"]["blur_threshold"],
-            blur_resize_scale=config["bgremover"]["blur_resize_scale"],
+            postprocess=config["bgremover"]["postprocess"],
+            core_hull_resize_scale=config["bgremover"]["core_hull_resize_scale"],
+            core_hull_mask_threshold=config["bgremover"]["core_hull_mask_threshold"],
+            core_hull_erode_kernel=config["bgremover"]["core_hull_erode_kernel"],
+            core_hull_restore_dilate_scale=config["bgremover"]["core_hull_restore_dilate_scale"],
             device=config["bgremover"].get("device"),
         )
 
