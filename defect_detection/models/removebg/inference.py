@@ -6,7 +6,7 @@ import numpy as np
 from ultralytics import YOLO
 
 from defect_detection.outputs.removebg.output import ForegroundMaskOutput
-from .post_process import make_core_hull_mask
+from .post_process import make_core_hull_mask, mask_to_polygons_n
 
 
 class BackgroundRemover:
@@ -14,7 +14,7 @@ class BackgroundRemover:
         self,
         checkpoint_path: str,
         imgsz: int,
-        postprocess: bool = True,
+        mask_mode: str = "postprocess",
         core_hull_resize_scale: float = 0.25,
         core_hull_mask_threshold: float = 0.9,
         core_hull_erode_kernel: int = 81,
@@ -24,7 +24,9 @@ class BackgroundRemover:
         self.model = YOLO(checkpoint_path)
         self.imgsz = imgsz
         self.device = device
-        self.postprocess = postprocess
+        if mask_mode not in {"raw", "postprocess", "and"}:
+            raise ValueError("mask_mode must be one of: raw, postprocess, and")
+        self.mask_mode = mask_mode
         self.core_hull_resize_scale = min(1.0, max(0.05, float(core_hull_resize_scale)))
         self.core_hull_mask_threshold = float(core_hull_mask_threshold)
         self.core_hull_erode_kernel = max(1, int(core_hull_erode_kernel))
@@ -108,6 +110,15 @@ class BackgroundRemover:
 
         return np.stack(refined_masks).astype(np.float32), refined_polygons
 
+    def _intersect_masks(
+        self,
+        masks: np.ndarray,
+        refined_masks: np.ndarray,
+    ) -> tuple[np.ndarray, list[list[np.ndarray]]]:
+        masks = ((masks > 0.5) & (refined_masks > 0.5)).astype(np.float32)
+        polygons = [mask_to_polygons_n(mask) for mask in masks]
+        return masks, polygons
+
     def infer(
         self,
         images: Sequence[np.ndarray],
@@ -121,11 +132,14 @@ class BackgroundRemover:
 
         masks, polygons_n = self._parse_yolo_segmentation(results)
 
-        if self.postprocess:
+        if self.mask_mode == "postprocess":
             masks, polygons_n = self._make_core_hull_masks(
                 masks,
                 polygons_n,
             )
+        elif self.mask_mode == "and":
+            refined_masks, _ = self._make_core_hull_masks(masks, polygons_n)
+            masks, polygons_n = self._intersect_masks(masks, refined_masks)
 
         foreground_images = self._apply_background_removal(
             images,

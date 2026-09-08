@@ -35,6 +35,20 @@ def _normalized_polygon(
     return np.clip(polygon, 0, 1)
 
 
+def mask_to_polygons_n(mask: np.ndarray) -> list[np.ndarray]:
+    H, W = mask.shape[:2]
+    contours, _ = cv2.findContours(
+        (mask > 0).astype(np.uint8),
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+    return [
+        _normalized_polygon(contour, W, H)
+        for contour in contours
+        if cv2.contourArea(contour) > 0
+    ]
+
+
 def _ellipse_kernel(size: float) -> np.ndarray:
     size = _odd_kernel_size(size)
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
